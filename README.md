@@ -22,6 +22,7 @@ LoopyMSE was licensed under the GPLv3+, this is derived from it (mostly the VDP 
 
 # TODO
 
+- Add ADPCM sound chip used for Wan Wan Story.
 - Swap the sound core for something else. I have ideas but for now this is good enough. I may revisit this given circumstances.
 - VDP core may need some improvements. Perhaps a re-basing from scratch from MAME's would be nice.
 - SDL 1.2 core for low end devices like OpenDingux with RGB565 output support (we can't go lower as Casio Loopy can display 512 colors in total, using the two layers, possibly more with raster tricks)
