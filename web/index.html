@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Casio Loopy WebAssembly</title>
+  <title>CLoopy emulator</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -22,7 +22,7 @@
     <aside id="sideMenu" class="side-menu" aria-label="Emulator menu">
       <header class="menu-header">
         <div>
-          <h1>Casio Loopy</h1>
+          <h1>Casio Loopy emulator</h1>
           <p>clang wasm32 core, browser UI</p>
         </div>
         <button id="closeMenu" class="icon-button" aria-label="Close menu">×</button>
@@ -111,10 +111,6 @@
       <div id="startupCartName" class="muted">no cartridge selected</div>
       <div id="startupError" class="status-bad"></div>
       <div class="modal-actions"><button id="closeStartupAlt" type="button">Close</button><button id="startButton">Start / restart</button></div>
-      <details>
-        <summary>Backend details</summary>
-        <p>This follows the reference web frontend shape: JavaScript owns file pickers, IndexedDB ROM persistence, canvas scaling, audio worklet, input mapping, and save-state storage; C exposes a small raw WebAssembly ABI.</p>
-      </details>
     </div>
   </div>
 
