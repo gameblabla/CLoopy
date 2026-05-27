@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Casio Loopy WebAssembly</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <main class="stage">
+      <div id="screenFrame" class="screen-frame" tabindex="0" aria-label="Casio Loopy video output">
+        <canvas id="video" width="256" height="240"></canvas>
+        <div id="fpsCounter" class="fps-counter hidden">0.0 FPS</div>
+        <div class="overlay-actions">
+          <button id="menuToggle" class="icon-button" title="Menu" aria-label="Menu">☰</button>
+          <button id="fullscreenToggle" class="icon-button" title="Fullscreen" aria-label="Fullscreen">⛶</button>
+        </div>
+      </div>
+    </main>
+
+    <aside id="sideMenu" class="side-menu" aria-label="Emulator menu">
+      <header class="menu-header">
+        <div>
+          <h1>Casio Loopy</h1>
+          <p>clang wasm32 core, browser UI</p>
+        </div>
+        <button id="closeMenu" class="icon-button" aria-label="Close menu">×</button>
+      </header>
+
+      <section class="panel-section">
+        <h2>System</h2>
+        <div class="row"><button id="openStartup">ROM manager</button><button id="softResetTop" type="button">Soft reset</button></div>
+        <dl class="runtime-grid">
+          <dt>Status</dt><dd id="runtimeStatus">loading</dd>
+          <dt>Resolution</dt><dd id="runtimeResolution">256 × 240</dd>
+          <dt>Frame</dt><dd id="runtimeFrame">0</dd>
+          <dt>Cart</dt><dd id="runtimeCart">none</dd>
+        </dl>
+      </section>
+
+      <section class="panel-section">
+        <h2>Load cartridge</h2>
+        <label class="file-button wide">Load .bin cartridge / reset<input id="cartFile" type="file" accept=".bin,.rom,application/octet-stream"></label>
+        <div id="cartName" class="muted">no cartridge selected</div>
+      </section>
+
+      <section class="panel-section">
+        <h2>Video</h2>
+        <label>Aspect
+          <select id="aspectMode">
+            <option value="native">Native pixels</option>
+            <option value="4:3">4:3 display</option>
+            <option value="stretch">Stretch to frame</option>
+          </select>
+        </label>
+        <label class="check-row"><input id="smoothUpscale" type="checkbox"> Browser bilinear final upscale</label>
+        <label class="check-row"><input id="scanlines" type="checkbox"> CSS scanline overlay</label>
+        <label class="check-row"><input id="showFps" type="checkbox"> Show visual FPS counter</label>
+      </section>
+
+      <section class="panel-section">
+        <h2>Input</h2>
+        <label>Port device
+          <select id="portDevice">
+            <option value="gamepad">Gamepad</option>
+            <option value="mouse">Mouse</option>
+          </select>
+        </label>
+        <div class="row input-actions"><button id="captureMouse" type="button">Capture mouse</button></div>
+        <div id="mouseCaptureStatus" class="muted">Mouse capture inactive</div>
+        <div id="controlMap" class="control-map"></div>
+        <p class="hint">Click a mapping, then press a key. In Mouse mode, click the screen or Capture mouse to lock pointer movement; Esc releases it. Keyboard shortcuts: F1 menu, F5 save state, F7 load state, F11 fullscreen, Ctrl+M mouse capture.</p>
+      </section>
+
+      <section class="panel-section">
+        <h2>Save states</h2>
+        <div class="row"><button id="pauseToggle">Pause</button><button id="resetButton">Soft reset</button></div>
+        <label>Slot <select id="stateSlot"></select></label>
+        <div class="row"><button id="saveState">Save</button><button id="loadState">Load</button></div>
+      </section>
+
+      <section class="panel-section">
+        <h2>Storage</h2>
+        <p id="storageStatus" class="muted">checking browser storage...</p>
+        <button id="clearStorage">Clear stored ROMs, SRAM, config, and states</button>
+      </section>
+    </aside>
+  </div>
+
+  <div id="startupModal" class="modal open" role="dialog" aria-modal="true" aria-labelledby="startupTitle">
+    <div class="modal-card">
+      <div class="modal-title-row">
+        <h2 id="startupTitle">Loopy ROM setup</h2>
+        <button id="closeStartup" class="icon-button" type="button" aria-label="Close ROM manager">×</button>
+      </div>
+      <p>The browser build does not bundle copyrighted ROMs. Provide <code>loopy_bios.bin</code> and <code>loopy_sound.bin</code>. CRC32 is shown after loading; a mismatch does not block startup, but it means the ROM may be invalid.</p>
+      <div class="bios-grid">
+        <article id="biosCard" class="bios-card">
+          <h3>Internal ROM</h3>
+          <p id="biosStatus" class="muted">missing</p>
+          <label class="file-button wide">Store loopy_bios.bin<input id="biosFile" type="file" accept=".bin,.rom,application/octet-stream"></label>
+        </article>
+        <article id="soundCard" class="bios-card">
+          <h3>Sound ROM</h3>
+          <p id="soundStatus" class="muted">missing</p>
+          <label class="file-button wide">Store loopy_sound.bin<input id="soundFile" type="file" accept=".bin,.rom,application/octet-stream"></label>
+        </article>
+      </div>
+      <label class="file-button wide">Load cartridge now<input id="startupCartFile" type="file" accept=".bin,.rom,application/octet-stream"></label>
+      <div id="startupCartName" class="muted">no cartridge selected</div>
+      <div id="startupError" class="status-bad"></div>
+      <div class="modal-actions"><button id="closeStartupAlt" type="button">Close</button><button id="startButton">Start / restart</button></div>
+      <details>
+        <summary>Backend details</summary>
+        <p>This follows the reference web frontend shape: JavaScript owns file pickers, IndexedDB ROM persistence, canvas scaling, audio worklet, input mapping, and save-state storage; C exposes a small raw WebAssembly ABI.</p>
+      </details>
+    </div>
+  </div>
+
+  <div id="printModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="printTitle">
+    <div class="modal-card print-card">
+      <h2 id="printTitle">Printer output ready</h2>
+      <p>The emulator intercepted the BIOS print-source image before the thermal mechanism phase. Download the sticker image or close this preview.</p>
+      <canvas id="printCanvas" width="256" height="224"></canvas>
+      <div class="modal-actions"><button id="downloadPrint" type="button">Download PNG</button><button id="closePrint" type="button">Close</button></div>
+    </div>
+  </div>
+
+  <script type="module" src="loopy-wasm.js"></script>
+</body>
+</html>

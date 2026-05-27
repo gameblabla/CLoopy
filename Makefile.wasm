@@ -1,0 +1,41 @@
+WASM_CC ?= clang
+WASM_LD ?= wasm-ld
+PORT ?= 8008
+OUT_DIR := web
+OUT_WASM := $(OUT_DIR)/loopy_wasm_core.wasm
+BUILD_DIR := build-wasm
+
+WASM_CFLAGS := --target=wasm32-unknown-unknown -O2 -g0 -fno-common -std=c11 -D__STDC_HOSTED__=0 \
+  -Iwasm/libc/include -Isrc -include common/log.h -DLOOPY_WASM_FRONTEND -DNDEBUG \
+  -Wno-builtin-macro-redefined -Wno-deprecated-non-prototype -Wno-unused-function
+WASM_LDFLAGS := --no-entry --export-memory --initial-memory=67108864 --max-memory=536870912 --allow-undefined
+WASM_EXPORTS := \
+  --export=loopy_wasm_version --export=loopy_wasm_malloc --export=loopy_wasm_heap_used --export=loopy_wasm_reset_heap --export=loopy_wasm_init --export=loopy_wasm_crc32 \
+  --export=loopy_wasm_load_bios --export=loopy_wasm_load_sound_rom --export=loopy_wasm_load_cart --export=loopy_wasm_load_sram --export=loopy_wasm_start --export=loopy_wasm_soft_reset --export=loopy_wasm_set_paused --export=loopy_wasm_set_port_device --export=loopy_wasm_get_port_device --export=loopy_wasm_frame \
+  --export=loopy_wasm_get_framebuffer_rgb555 --export=loopy_wasm_get_framebuffer_rgba --export=loopy_wasm_get_width --export=loopy_wasm_get_height --export=loopy_wasm_get_active_height --export=loopy_wasm_get_full_height --export=loopy_wasm_get_y_offset --export=loopy_wasm_get_active_y_offset --export=loopy_wasm_get_status --export=loopy_wasm_get_error --export=loopy_wasm_get_frame_count \
+  --export=loopy_wasm_get_audio_rate --export=loopy_wasm_get_audio_ptr --export=loopy_wasm_get_audio_frames --export=loopy_wasm_audio_consume \
+  --export=loopy_wasm_save_state --export=loopy_wasm_get_save_ptr --export=loopy_wasm_get_save_size --export=loopy_wasm_prepare_load_state --export=loopy_wasm_load_prepared_state --export=loopy_wasm_load_state --export=loopy_wasm_save_sram --export=loopy_wasm_get_sram_ptr --export=loopy_wasm_get_sram_size \
+  --export=loopy_wasm_print_pending --export=loopy_wasm_print_width --export=loopy_wasm_print_height --export=loopy_wasm_print_rgba --export=loopy_wasm_print_clear
+
+CORE_SRCS := $(shell find src -name '*.c' | sort | grep -v 'src/main.c' | grep -v 'src/sdl3/main_sdl3.c') wasm/libc/src/loopy_wasm_libc.c wasm/loopy_wasm_core.c
+OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(CORE_SRCS))
+
+.PHONY: all build clean serve
+all: build
+build: $(OUT_WASM)
+
+$(OUT_WASM): $(OBJS) | $(OUT_DIR)
+	$(WASM_LD) $(WASM_LDFLAGS) $(WASM_EXPORTS) -o $@ $(OBJS)
+
+$(BUILD_DIR)/%.o: %.c
+	@mkdir -p $(dir $@)
+	$(WASM_CC) $(WASM_CFLAGS) -c $< -o $@
+
+$(OUT_DIR):
+	mkdir -p $(OUT_DIR)
+
+serve: build
+	python3 -m http.server $(PORT) --directory $(OUT_DIR)
+
+clean:
+	rm -rf $(BUILD_DIR) $(OUT_WASM)

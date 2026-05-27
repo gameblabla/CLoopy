@@ -1,0 +1,8 @@
+build-wasm/
+*.o
+*.a
+*.elf
+cloopy_headless
+cloopy_sdl3
+web/loopy_wasm_core.wasm
+build/

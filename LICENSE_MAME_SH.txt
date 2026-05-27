@@ -1,0 +1,6 @@
+MAME SH/SH7021 CPU core attribution
+
+The C11 SH7021 instruction executor in src/core/sh7021/sh7021_interpreter.c is adapted from MAME src/devices/cpu/sh/sh.cpp and sh7021.cpp from the user-supplied MAME archive.
+Original file headers declare BSD-3-Clause licensing and list the following copyright holders/contributors in those files: David Haywood, Juergen Buchmueller, R. Belmont, Ryan Holtz, and MAME contributors.
+
+MAME SH CPU files are BSD-3-Clause licensed; see upstream MAME src/devices/cpu/sh/*.cpp headers.
