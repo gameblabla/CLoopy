@@ -11,6 +11,7 @@ typedef struct LoopyLaunchInfo {
     const char *cart_path;
     const char *bios_path;
     const char *sound_path;
+    const char *oki_adpcm_path;
     int frames;
     int frames_set;
     int headless;
@@ -19,7 +20,9 @@ typedef struct LoopyLaunchInfo {
     const char *record_cmdlist_path;
     const char *replay_cmdlist_path;
     const char *record_y4m_path;
+    const char *record_wav_path;
     const char *load_state_path;
+    const char *wanwan_oki_montage_path;
     int y4m_start;
     int y4m_step;
     int auto_cascadefx;

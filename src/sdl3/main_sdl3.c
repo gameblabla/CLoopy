@@ -65,6 +65,8 @@ typedef struct App {
     bool cmd_writer_open;
     uint32_t emu_frame;
     uint32_t frame_limit;
+    bool fast_forward_hold;
+    int fast_forward_level;
 } App;
 
 typedef struct ReplayApp {
@@ -210,6 +212,27 @@ static const char *scale_name(ScaleModeUI m) {
     case SCALE_BICUBIC: return "Bicubic";
     default: return "Unknown";
     }
+}
+
+static int fast_forward_multiplier(const App *app) {
+    static const int locked_speeds[] = { 1, 2, 4, 8 };
+    int m = 1;
+    if (app) {
+        int level = app->fast_forward_level;
+        if (level < 0) level = 0;
+        if (level > 3) level = 3;
+        m = locked_speeds[level];
+        if (app->fast_forward_hold && m < 4) m = 4;
+    }
+    return m;
+}
+
+static void fast_forward_message(App *app) {
+    char msg[64];
+    int m = fast_forward_multiplier(app);
+    if (m <= 1) snprintf(msg, sizeof(msg), "Fast forward off");
+    else snprintf(msg, sizeof(msg), "Fast forward %dx", m);
+    set_message(app, msg);
 }
 
 static void save_ui_config(App *app) {
@@ -394,7 +417,7 @@ static void draw_overlay(App *app) {
     }
 }
 
-#define MENU_ITEM_COUNT 12
+#define MENU_ITEM_COUNT 13
 #define REMAP_ITEM_COUNT 11
 #define MENU_X 56.0f
 #define MENU_Y 100.0f
@@ -404,7 +427,7 @@ static void draw_overlay(App *app) {
 #define MENU_PANEL_X 32.0f
 #define MENU_PANEL_Y 32.0f
 #define MENU_PANEL_W 460.0f
-#define MENU_PANEL_H 424.0f
+#define MENU_PANEL_H 452.0f
 #define MENU_TOAST_X 516.0f
 #define MENU_TOAST_Y 42.0f
 #define MENU_TOAST_W 316.0f
@@ -432,6 +455,8 @@ static void draw_shortcuts_toast(App *app) {
 
     static const char *shortcut_lines[] = {
         "F1 Save   F2 Load",
+        "F8 Fast-forward lock",
+        "Hold Tab: temporary 4x",
         "F11 Fullscreen   F12 Reset",
         "Ctrl+M Mouse capture",
         "Esc Back / menu"
@@ -452,7 +477,7 @@ static void draw_shortcuts_toast(App *app) {
 
 static void draw_menu(App *app) {
     if (!app->menu_open) return;
-    static const char *items[] = {"Resume", "Save state", "Load state", "State slot", "Scaling", "Integer scale", "Port 1 device", "Mouse capture", "Remap controls", "Soft reset", "Cmd recording", "Quit"};
+    static const char *items[] = {"Resume", "Save state", "Load state", "State slot", "Scaling", "Integer scale", "Port 1 device", "Mouse capture", "Remap controls", "Soft reset", "Cmd recording", "Fast forward", "Quit"};
     draw_panel(app, MENU_PANEL_X, MENU_PANEL_Y, MENU_PANEL_W, MENU_PANEL_H);
     draw_text(app, MENU_PANEL_X + 20.0f, MENU_PANEL_Y + 18.0f, "CLoopy", true);
     draw_text(app, MENU_PANEL_X + 20.0f, MENU_PANEL_Y + 38.0f, "SDL3 frontend", false);
@@ -471,7 +496,10 @@ static void draw_menu(App *app) {
         else if (i == 6) snprintf(line, sizeof(line), "%s: %s", items[i], input_get_port_device() == INPUT_PORT_MOUSE ? "Mouse" : "Gamepad");
         else if (i == 7) snprintf(line, sizeof(line), "%s: %s", items[i], app->mouse_capture ? "on" : "off");
         else if (i == 10) snprintf(line, sizeof(line), "%s: %s", items[i], app->cmd_writer_open ? "on" : "off");
-        else snprintf(line, sizeof(line), "%s", items[i]);
+        else if (i == 11) {
+            int m = fast_forward_multiplier(app);
+            snprintf(line, sizeof(line), "%s: %s", items[i], m <= 1 ? "off" : (m == 2 ? "2x" : (m == 4 ? "4x" : "8x")));
+        } else snprintf(line, sizeof(line), "%s", items[i]);
         draw_text(app, MENU_X + 12.0f, MENU_Y + 5.0f + i * MENU_ROW_H, line, i == app->menu_index);
     }
 
@@ -617,6 +645,10 @@ static void menu_activate(App *app) {
         else set_message(app, "Use --record-cmdlist <file>");
         break;
     case 11:
+        app->fast_forward_level = (app->fast_forward_level + 1) & 3;
+        fast_forward_message(app);
+        break;
+    case 12:
         app->running = false;
         break;
     }
@@ -634,6 +666,12 @@ static void handle_keyboard(App *app, SDL_KeyboardEvent *key) {
         if (down) { app->bind[app->remap_index].key = sym; save_ui_config(app); apply_bindings(app); set_message(app, "Control remapped"); return; }
         return;
     }
+    if (sym == SDLK_TAB) {
+        app->fast_forward_hold = down;
+        if (down) fast_forward_message(app);
+        return;
+    }
+    if (down && sym == SDLK_F8) { app->fast_forward_level = (app->fast_forward_level + 1) & 3; fast_forward_message(app); return; }
     if (down && sym == SDLK_F11) { toggle_fullscreen(app); return; }
     if (down && sym == SDLK_F12) { soft_reset(app); return; }
     if (down && sym == SDLK_M && (key->mod & SDL_KMOD_CTRL)) {
@@ -1001,7 +1039,7 @@ static int run_cmdlist_replay(const char *path, uint32_t frame_limit) {
 int main(int argc, char **argv) {
     LoopyLaunchInfo launch;
     if (loopy_parse_common_args(argc, argv, &launch, 0) != 0) {
-        printf("Args: <game ROM> <BIOS> [sound BIOS] [--device gamepad|mouse] [--mouse|--gamepad] [--record-cmdlist file] [--frames N]\n");
+        printf("Args: <game ROM> <BIOS> [sound BIOS] [OKI ADPCM ROM] [--device gamepad|mouse] [--mouse|--gamepad] [--record-cmdlist file] [--frames N] [--oki-rom file]\n");
         //printf("Replay: --replay-cmdlist file [--frames N]\n"); 
         return 1;
     }
@@ -1055,18 +1093,21 @@ int main(int argc, char **argv) {
     while (app.running) {
         uint64_t frame_start = SDL_GetTicks();
         poll_events(&app);
+        int ff_mult = fast_forward_multiplier(&app);
         if (!app.menu_open && !app.remap_mode) {
-            system_run();
-            record_current_cmdlist_frame(&app);
-            app.emu_frame++;
-            if (app.frame_limit && app.emu_frame >= app.frame_limit) app.running = false;
+            for (int step = 0; step < ff_mult && app.running; step++) {
+                system_run();
+                record_current_cmdlist_frame(&app);
+                app.emu_frame++;
+                if (app.frame_limit && app.emu_frame >= app.frame_limit) app.running = false;
+            }
         }
         render_frame(&app);
         draw_overlay(&app);
         draw_menu(&app);
         SDL_RenderPresent(app.renderer);
         uint64_t elapsed = SDL_GetTicks() - frame_start;
-        if (elapsed < 16) SDL_Delay(16 - (Uint32)elapsed);
+        if (fast_forward_multiplier(&app) <= 1 && elapsed < 16) SDL_Delay(16 - (Uint32)elapsed);
     }
 
     SDL_SetWindowRelativeMouseMode(app.window, false);

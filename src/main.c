@@ -5,6 +5,8 @@
 #include "input/input.h"
 #include "core/loopy_io.h"
 #include "video/video.h"
+#include "sound/sound.h"
+#include "sound/oki_adpcm.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -180,6 +182,113 @@ static void y4m_close(HeadlessY4MWriter *w) {
 }
 
 
+
+static void montage_wav_u16(FILE *f, uint16_t v) {
+    fputc((int)(v & 0xFFu), f);
+    fputc((int)(v >> 8), f);
+}
+
+static void montage_wav_u32(FILE *f, uint32_t v) {
+    montage_wav_u16(f, (uint16_t)v);
+    montage_wav_u16(f, (uint16_t)(v >> 16));
+}
+
+static void montage_write_samples(FILE *f, const int16_t *samples, int frames, uint32_t *bytes) {
+    if (!f || !samples || frames <= 0 || !bytes) return;
+    size_t wrote = fwrite(samples, sizeof(int16_t), (size_t)frames * 2u, f);
+    *bytes += (uint32_t)(wrote * sizeof(int16_t));
+}
+
+static int write_wanwan_oki_montage(const char *path) {
+    static const uint8_t order[22] = {
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16
+    };
+    const int rate = SOUND_TARGET_SAMPLE_RATE;
+    const int gap_frames = rate * 2;
+    const int max_phrase_frames = rate * 5;
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        fprintf(stderr, "Could not open Wanwan OKI montage output: %s\n", path ? path : "(null)");
+        return 1;
+    }
+
+    fwrite("RIFF", 1, 4, f);
+    montage_wav_u32(f, 0);
+    fwrite("WAVEfmt ", 1, 8, f);
+    montage_wav_u32(f, 16);
+    montage_wav_u16(f, 1);
+    montage_wav_u16(f, 2);
+    montage_wav_u32(f, (uint32_t)rate);
+    montage_wav_u32(f, (uint32_t)rate * 2u * 2u);
+    montage_wav_u16(f, 4);
+    montage_wav_u16(f, 16);
+    fwrite("data", 1, 4, f);
+    montage_wav_u32(f, 0);
+
+    OkiAdpcm *oki = oki_adpcm_create((float)rate, NULL, 0, 1);
+    if (!oki) {
+        fclose(f);
+        fprintf(stderr, "Could not create Wanwan OKI decoder for montage\n");
+        return 1;
+    }
+
+    int16_t zeros[512 * 2];
+    int16_t block[512 * 2];
+    memset(zeros, 0, sizeof(zeros));
+    uint32_t data_bytes = 0;
+
+    printf("Wanwan OKI montage order:");
+    for (int i = 0; i < 22; i++) printf(" %02X", order[i]);
+    printf("\n");
+
+    for (int cmd_i = 0; cmd_i < 22; cmd_i++) {
+        uint8_t command = order[cmd_i];
+        printf("Wanwan OKI montage command %02X at item %d/22\n", command, cmd_i + 1);
+        oki_adpcm_reset(oki);
+        oki_adpcm_debug_play_command(oki, command);
+        int phrase_frames = 0;
+        int trailing_silence = 0;
+        while (phrase_frames < max_phrase_frames) {
+            int n = max_phrase_frames - phrase_frames;
+            if (n > 512) n = 512;
+            for (int i = 0; i < n; i++) {
+                float v = oki_adpcm_generate(oki) * 0.85f;
+                if (v > 1.0f) v = 1.0f;
+                if (v < -1.0f) v = -1.0f;
+                int16_t s16 = (int16_t)(v * 32767.0f);
+                block[i * 2 + 0] = s16;
+                block[i * 2 + 1] = s16;
+            }
+            montage_write_samples(f, block, n, &data_bytes);
+            phrase_frames += n;
+            if (!oki_adpcm_debug_active(oki)) {
+                trailing_silence += n;
+                if (trailing_silence >= rate / 10) break;
+            } else {
+                trailing_silence = 0;
+            }
+        }
+        int gap_left = gap_frames;
+        while (gap_left > 0) {
+            int n = gap_left > 512 ? 512 : gap_left;
+            montage_write_samples(f, zeros, n, &data_bytes);
+            gap_left -= n;
+        }
+    }
+
+    oki_adpcm_destroy(oki);
+    uint32_t riff_size = 36u + data_bytes;
+    fseek(f, 4, SEEK_SET);
+    montage_wav_u32(f, riff_size);
+    fseek(f, 40, SEEK_SET);
+    montage_wav_u32(f, data_bytes);
+    fclose(f);
+    printf("Wrote Wanwan OKI montage WAV: %s\n", path);
+    return 0;
+}
+
 static int run_cmdlist_print_extract(const LoopyLaunchInfo *launch) {
     LoopyCmdListReader reader;
     if (loopy_cmdlist_reader_open(&reader, launch->replay_cmdlist_path) != 0) {
@@ -220,9 +329,13 @@ static int run_cmdlist_print_extract(const LoopyLaunchInfo *launch) {
 int main(int argc, char **argv) {
     LoopyLaunchInfo launch;
     if (loopy_parse_common_args(argc, argv, &launch, 4800) != 0) {
-        printf("Args: <game ROM> <BIOS> [sound BIOS] [--frames N] [--device gamepad|mouse] [--mouse|--gamepad] [--record-y4m file] [--load-state file] [--y4m-start N] [--y4m-step N] [--auto-cascadefx] [--cascadefx-watch] [--cascadefx-prof] [--cascadefx-dpad-test] [--cascadefx-dpad-prehold-test] [--cascadefx-dpad-tap-test] [--cascadefx-pad-trace] [--auto-anarch] [--anarch-prof] [--lr-hold-left] [--lr-hold-left-start N] [--lr-mouse-dx N] [--printer-output-dir dir] [--printer-trace]\n");
+        printf("Args: <game ROM> <BIOS> [sound BIOS] [OKI ADPCM ROM] [--frames N] [--device gamepad|mouse] [--mouse|--gamepad] [--record-y4m file] [--record-wav file] [--load-state file] [--oki-rom file] [--wanwan-oki-montage-wav file] [--y4m-start N] [--y4m-step N] [--auto-cascadefx] [--cascadefx-watch] [--cascadefx-prof] [--cascadefx-dpad-test] [--cascadefx-dpad-prehold-test] [--cascadefx-dpad-tap-test] [--cascadefx-pad-trace] [--auto-anarch] [--anarch-prof] [--lr-hold-left] [--lr-hold-left-start N] [--lr-mouse-dx N] [--printer-output-dir dir] [--printer-trace]\n");
         printf("Default: --frames 4800, which waits long enough for Little Romance and the other retail title screens under the MAME-derived SH7021 core.\n");
         return 1;
+    }
+
+    if (launch.wanwan_oki_montage_path) {
+        return write_wanwan_oki_montage(launch.wanwan_oki_montage_path);
     }
 
     if (launch.replay_cmdlist_path) {
@@ -249,6 +362,9 @@ int main(int argc, char **argv) {
     if (launch.record_y4m_path && y4m_open(&y4m, launch.record_y4m_path) != 0) {
         fprintf(stderr, "Could not open Y4M output: %s\n", launch.record_y4m_path);
     }
+    if (launch.record_wav_path && sound_wav_open(launch.record_wav_path) != 0) {
+        fprintf(stderr, "Could not open WAV output: %s\n", launch.record_wav_path);
+    }
     for (int i = 0; i < launch.frames; i++) {
         LOOPY_DEBUG_PRINTF("[Main] Running frame %d/%d\n", i + 1, launch.frames);
         if (launch.auto_cascadefx) apply_cascadefx_autoinput(i + 1, launch.cascadefx_dpad_test, launch.cascadefx_dpad_prehhold_test, launch.cascadefx_dpad_tap_test);
@@ -256,6 +372,7 @@ int main(int argc, char **argv) {
         if (launch.lr_hold_left) apply_little_romance_hold_left(i + 1, launch.lr_hold_left_start, launch.lr_mouse_dx);
         if (launch.cascadefx_pad_trace) loopy_io_controller_debug_reset();
         system_run();
+        sound_wav_write_frame();
         if (launch.cascadefx_watch) print_cascadefx_watch(i + 1);
         if (launch.cascadefx_pad_trace) {
             unsigned r0, r1, r2; uint16_t v0, v1, v2;
@@ -286,6 +403,7 @@ int main(int argc, char **argv) {
         }
     }
     y4m_close(&y4m);
+    sound_wav_close();
     system_shutdown();
     loopy_config_free(&config);
     return 0;

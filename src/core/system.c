@@ -18,7 +18,7 @@ void system_initialize(const ConfigSystemInfo *config) {
     loopy_io_initialize();
     input_initialize();
     video_initialize();
-    sound_initialize(&config->sound_rom);
+    sound_initialize(&config->sound_rom, &config->oki_adpcm_rom, config->cart_is_wanwan);
     sh7021_ocpm_serial_set_tx_callback(1, sound_midi_byte_in);
 }
 

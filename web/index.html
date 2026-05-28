@@ -94,7 +94,7 @@
         <h2 id="startupTitle">Loopy ROM setup</h2>
         <button id="closeStartup" class="icon-button" type="button" aria-label="Close ROM manager">×</button>
       </div>
-      <p>The browser build does not bundle copyrighted ROMs. Provide <code>loopy_bios.bin</code> and <code>loopy_sound.bin</code>. CRC32 is shown after loading; a mismatch does not block startup, but it means the ROM may be invalid.</p>
+      <p>The browser build does not bundle copyrighted ROMs. Provide <code>loopy_bios.bin</code> to start. <code>loopy_sound.bin</code> is optional; without it the internal music chip is silent, but cartridge ADPCM can still play.</p>
       <div class="bios-grid">
         <article id="biosCard" class="bios-card">
           <h3>Internal ROM</h3>
@@ -102,9 +102,15 @@
           <label class="file-button wide">Store loopy_bios.bin<input id="biosFile" type="file" accept=".bin,.rom,application/octet-stream"></label>
         </article>
         <article id="soundCard" class="bios-card">
-          <h3>Sound ROM</h3>
-          <p id="soundStatus" class="muted">missing</p>
+          <h3>Sound ROM <span class="muted">optional</span></h3>
+          <p id="soundStatus" class="muted">missing; internal music/synth will be silent</p>
           <label class="file-button wide">Store loopy_sound.bin<input id="soundFile" type="file" accept=".bin,.rom,application/octet-stream"></label>
+        </article>
+        <article id="okiCard" class="bios-card">
+          <h3>Wanwan OKI sample ROM <span class="muted">optional</span></h3>
+          <p id="okiStatus" class="muted">missing; freely licensed replacement ROM will be used</p>
+          <label class="file-button wide">Store MSM6653A-compatible sample ROM<input id="okiFile" type="file" accept=".bin,.rom,application/octet-stream"></label>
+          <p class="hint">Only Wanwan Aijou Monogatari uses this cartridge ADPCM ROM. For Wanwan, if none is provided, the built-in freely licensed replacement bank is used. A user-provided ROM takes precedence.</p>
         </article>
       </div>
       <label class="file-button wide">Load cartridge now<input id="startupCartFile" type="file" accept=".bin,.rom,application/octet-stream"></label>

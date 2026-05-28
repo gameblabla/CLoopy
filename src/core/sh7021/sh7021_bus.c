@@ -212,6 +212,7 @@ void unmapped_write32(uint32_t addr, uint32_t value) { LOOPY_DEBUG_PRINTF("[SH70
     if (addr >= VIDEO_DMA_START && addr < VIDEO_DMA_END) return video_dma_##access(__VA_ARGS__); \
     if (addr >= SH7021_OCPM_IO_BASE_ADDR && addr < SH7021_OCPM_IO_END_ADDR) return sh7021_ocpm_io_##access(__VA_ARGS__); \
     if (addr >= SOUND_CTRL_START && addr < SOUND_CTRL_END) return sound_ctrl_##access(__VA_ARGS__); \
+    if (addr >= SOUND_EXP_DATA_START && addr < SOUND_EXP_DATA_END) return sound_exp_data_##access(__VA_ARGS__); \
     return unmapped_##access(__VA_ARGS__)
 
 

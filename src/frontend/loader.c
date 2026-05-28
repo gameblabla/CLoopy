@@ -1,5 +1,6 @@
 #include "frontend/loader.h"
 #include "common/bswp.h"
+#include "core/cart_meta.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,7 @@ void loopy_config_free(ConfigSystemInfo *config) {
     free(config->cart.sram_file_path);
     byte_buffer_free(&config->bios_rom);
     byte_buffer_free(&config->sound_rom);
+    byte_buffer_free(&config->oki_adpcm_rom);
     memset(config, 0, sizeof(*config));
 }
 
@@ -65,6 +67,7 @@ int loopy_parse_common_args(int argc, char **argv, LoopyLaunchInfo *out, int def
     out->bios_path = argv[2];
     int argi = 3;
     if (argi < argc && strncmp(argv[argi], "--", 2) != 0) out->sound_path = argv[argi++];
+    if (argi < argc && strncmp(argv[argi], "--", 2) != 0) out->oki_adpcm_path = argv[argi++];
     while (argi < argc) {
         if (strcmp(argv[argi], "--frames") == 0 && argi + 1 < argc) {
             out->frames = atoi(argv[argi + 1]);
@@ -79,8 +82,17 @@ int loopy_parse_common_args(int argc, char **argv, LoopyLaunchInfo *out, int def
         } else if (strcmp(argv[argi], "--record-y4m") == 0 && argi + 1 < argc) {
             out->record_y4m_path = argv[argi + 1];
             argi += 2;
+        } else if (strcmp(argv[argi], "--record-wav") == 0 && argi + 1 < argc) {
+            out->record_wav_path = argv[argi + 1];
+            argi += 2;
         } else if (strcmp(argv[argi], "--load-state") == 0 && argi + 1 < argc) {
             out->load_state_path = argv[argi + 1];
+            argi += 2;
+        } else if ((strcmp(argv[argi], "--oki-rom") == 0 || strcmp(argv[argi], "--oki-adpcm-rom") == 0) && argi + 1 < argc) {
+            out->oki_adpcm_path = argv[argi + 1];
+            argi += 2;
+        } else if (strcmp(argv[argi], "--wanwan-oki-montage-wav") == 0 && argi + 1 < argc) {
+            out->wanwan_oki_montage_path = argv[argi + 1];
             argi += 2;
         } else if (strcmp(argv[argi], "--y4m-start") == 0 && argi + 1 < argc) {
             out->y4m_start = atoi(argv[argi + 1]);
@@ -153,6 +165,21 @@ int loopy_parse_common_args(int argc, char **argv, LoopyLaunchInfo *out, int def
                 return -1;
             }
             argi += 2;
+        } else if (strncmp(argv[argi], "--", 2) != 0) {
+            /* Accept remaining bare ROM paths as positional arguments even if
+             * they appear after frontend options.  This keeps SDL3/headless
+             * tolerant of the documented form:
+             *   <game ROM> <BIOS> [sound BIOS] [OKI ADPCM ROM]
+             * and prevents the optional OKI ROM from being rejected as an
+             * unknown argument. */
+            if (!out->sound_path) {
+                out->sound_path = argv[argi++];
+            } else if (!out->oki_adpcm_path) {
+                out->oki_adpcm_path = argv[argi++];
+            } else {
+                fprintf(stderr, "Unknown argument: %s\n", argv[argi]);
+                return -1;
+            }
         } else {
             fprintf(stderr, "Unknown argument: %s\n", argv[argi]);
             return -1;
@@ -181,6 +208,11 @@ int loopy_load_config(const LoopyLaunchInfo *launch, ConfigSystemInfo *config) {
         loopy_config_free(config);
         return -1;
     }
+    if (launch->oki_adpcm_path && byte_buffer_load_file(&config->oki_adpcm_rom, launch->oki_adpcm_path) != 0) {
+        fprintf(stderr, "Failed to open %s\n", launch->oki_adpcm_path);
+        loopy_config_free(config);
+        return -1;
+    }
 
     if (config->cart.rom.size < 0x18) {
         fprintf(stderr, "ROM is too small to contain a Loopy header\n");
@@ -192,6 +224,8 @@ int loopy_load_config(const LoopyLaunchInfo *launch, ConfigSystemInfo *config) {
         loopy_config_free(config);
         return -1;
     }
+
+    config->cart_is_wanwan = loopy_cart_rom_is_wanwan(config->cart.rom.data, config->cart.rom.size);
 
     uint32_t sram_start, sram_end;
     memcpy(&sram_start, config->cart.rom.data + 0x10, 4);

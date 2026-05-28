@@ -23,6 +23,8 @@ typedef struct ConfigSystemInfo {
     ConfigCartInfo cart;
     ByteBuffer bios_rom;
     ByteBuffer sound_rom;
+    ByteBuffer oki_adpcm_rom;
+    int cart_is_wanwan;
 } ConfigSystemInfo;
 
 void byte_buffer_init(ByteBuffer *buf);

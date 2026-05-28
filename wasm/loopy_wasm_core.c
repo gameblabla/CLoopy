@@ -7,9 +7,11 @@
 #include "core/config.h"
 #include "frontend/loader.h"
 #include "core/cart.h"
+#include "core/cart_meta.h"
 #include "core/system.h"
 #include "input/input.h"
 #include "sound/sound.h"
+#include "sound/oki_adpcm.h"
 #include "video/video.h"
 #include "core/loopy_io.h"
 
@@ -89,6 +91,12 @@ static void set_error(uint32_t err)
     status_code = STATUS_ERROR;
 }
 
+static void update_loaded_status(void)
+{
+    if(cfg.bios_rom.data) status_code = cfg.cart.rom.data ? STATUS_CART_READY : STATUS_ROMS_READY;
+    else status_code = STATUS_NEED_ROMS;
+}
+
 static void clear_audio(void)
 {
     audio_ring_frames = 0;
@@ -166,7 +174,7 @@ static void rgb555_to_rgba(uint16_t c, uint8_t *out)
 }
 
 __attribute__((export_name("loopy_wasm_version")))
-uint32_t loopy_wasm_version(void) { return 0x00000051u; }
+uint32_t loopy_wasm_version(void) { return 0x00000052u; }
 
 __attribute__((export_name("loopy_wasm_malloc")))
 uint32_t loopy_wasm_malloc(uint32_t size) { return (uint32_t)(uintptr_t)malloc(size ? size : 1u); }
@@ -213,7 +221,7 @@ uint32_t loopy_wasm_load_bios(uint32_t ptr, uint32_t size)
 {
     if(!ptr || size != 32768u) { set_error(ERR_BAD_BIOS); return 0; }
     if(!copy_into_buffer(&cfg.bios_rom, (const void*)(uintptr_t)ptr, size)) { set_error(ERR_BAD_BIOS); return 0; }
-    if(cfg.sound_rom.data && cfg.bios_rom.data) status_code = cfg.cart.rom.data ? STATUS_CART_READY : STATUS_ROMS_READY;
+    update_loaded_status();
     return crc32_update(0, cfg.bios_rom.data, (uint32_t)cfg.bios_rom.size);
 }
 
@@ -222,8 +230,17 @@ uint32_t loopy_wasm_load_sound_rom(uint32_t ptr, uint32_t size)
 {
     if(!ptr || size < 0x10000u) { set_error(ERR_BAD_SOUND); return 0; }
     if(!copy_into_buffer(&cfg.sound_rom, (const void*)(uintptr_t)ptr, size)) { set_error(ERR_BAD_SOUND); return 0; }
-    if(cfg.sound_rom.data && cfg.bios_rom.data) status_code = cfg.cart.rom.data ? STATUS_CART_READY : STATUS_ROMS_READY;
+    update_loaded_status();
     return crc32_update(0, cfg.sound_rom.data, (uint32_t)cfg.sound_rom.size);
+}
+
+__attribute__((export_name("loopy_wasm_load_oki_rom")))
+uint32_t loopy_wasm_load_oki_rom(uint32_t ptr, uint32_t size)
+{
+    if(!ptr || !size || size > 8u * 1024u * 1024u) { set_error(ERR_BAD_SOUND); return 0; }
+    if(!copy_into_buffer(&cfg.oki_adpcm_rom, (const void*)(uintptr_t)ptr, size)) { set_error(ERR_BAD_SOUND); return 0; }
+    update_loaded_status();
+    return crc32_update(0, cfg.oki_adpcm_rom.data, (uint32_t)cfg.oki_adpcm_rom.size);
 }
 
 __attribute__((export_name("loopy_wasm_load_cart")))
@@ -231,10 +248,11 @@ uint32_t loopy_wasm_load_cart(uint32_t ptr, uint32_t size)
 {
     if(!ptr || size < 0x18u || size > (4u * 1024u * 1024u)) { set_error(ERR_BAD_CART); return 0; }
     if(!copy_into_buffer(&cfg.cart.rom, (const void*)(uintptr_t)ptr, size)) { set_error(ERR_BAD_CART); return 0; }
+    cfg.cart_is_wanwan = loopy_cart_rom_is_wanwan(cfg.cart.rom.data, cfg.cart.rom.size);
     uint32_t sram_size = sram_size_from_cart(cfg.cart.rom.data, (uint32_t)cfg.cart.rom.size);
     byte_buffer_free(&cfg.cart.sram);
     byte_buffer_resize(&cfg.cart.sram, sram_size, 0xFFu);
-    status_code = (cfg.bios_rom.data && cfg.sound_rom.data) ? STATUS_CART_READY : STATUS_NEED_ROMS;
+    update_loaded_status();
     return crc32_update(0, cfg.cart.rom.data, (uint32_t)cfg.cart.rom.size);
 }
 
@@ -252,7 +270,7 @@ __attribute__((export_name("loopy_wasm_start")))
 uint32_t loopy_wasm_start(uint32_t device)
 {
     destroy_system_only();
-    if(!cfg.bios_rom.data || !cfg.sound_rom.data) { set_error(ERR_NO_ROMS); return 0; }
+    if(!cfg.bios_rom.data) { set_error(ERR_NO_ROMS); return 0; }
     if(!cfg.cart.rom.data) { set_error(ERR_NO_CART); return 0; }
     system_initialize(&cfg);
     input_set_port_device(device ? INPUT_PORT_MOUSE : INPUT_PORT_GAMEPAD);

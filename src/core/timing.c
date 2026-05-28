@@ -301,15 +301,16 @@ int timing_load_state(FILE *file) {
             t->events = ne;
             t->event_capacity = th.event_count;
         }
-        t->event_count = th.event_count;
-        for (size_t e = 0; e < t->event_count; e++) {
+        t->event_count = 0;
+        for (size_t e = 0; e < th.event_count; e++) {
             EventSave es;
             if (fread(&es, sizeof(es), 1, file) != 1) return -1;
-            if (es.func_index < 0 || (size_t)es.func_index >= state.func_count) return -1;
-            t->events[e].exec_time = es.exec_time;
-            t->events[e].param = es.param;
-            t->events[e].func = state.funcs[es.func_index].func;
-            t->events[e].id = es.id;
+            if (es.func_index < 0 || (size_t)es.func_index >= state.func_count) continue;
+            size_t dst = t->event_count++;
+            t->events[dst].exec_time = es.exec_time;
+            t->events[dst].param = es.param;
+            t->events[dst].func = state.funcs[es.func_index].func;
+            t->events[dst].id = es.id;
         }
         heapify(t);
     }
@@ -396,15 +397,16 @@ int timing_set_state_blob(const void *src, uint32_t size) {
             t->events = ne;
             t->event_capacity = th.event_count;
         }
-        t->event_count = th.event_count;
-        for (size_t e = 0; e < t->event_count; e++) {
+        t->event_count = 0;
+        for (size_t e = 0; e < th.event_count; e++) {
             EventSave es;
             if (timing_blob_read(&p, end, &es, sizeof(es)) != 0) return -1;
-            if (es.func_index < 0 || (size_t)es.func_index >= state.func_count) return -1;
-            t->events[e].exec_time = es.exec_time;
-            t->events[e].param = es.param;
-            t->events[e].func = state.funcs[es.func_index].func;
-            t->events[e].id = es.id;
+            if (es.func_index < 0 || (size_t)es.func_index >= state.func_count) continue;
+            size_t dst = t->event_count++;
+            t->events[dst].exec_time = es.exec_time;
+            t->events[dst].param = es.param;
+            t->events[dst].func = state.funcs[es.func_index].func;
+            t->events[dst].id = es.id;
         }
         heapify(t);
     }

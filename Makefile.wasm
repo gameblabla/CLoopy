@@ -4,6 +4,13 @@ PORT ?= 8008
 OUT_DIR := web
 OUT_WASM := $(OUT_DIR)/loopy_wasm_core.wasm
 BUILD_DIR := build-wasm
+PYTHON ?= python3
+WANWAN_SOUND_DIR ?= assets/wanwan_free_sounds
+WANWAN_OKI_ROM ?= wanwan_synthetic_msm6653a_457.bin
+WANWAN_OKI_ORDER ?= wanwan_synthetic_msm6653a_457_order.txt
+WANWAN_OKI_BANK_C := src/sound/wanwan_oki_bank.c
+WANWAN_OKI_BANK_H := src/sound/wanwan_oki_bank.h
+WANWAN_OKI_SAMPLE_FILES := $(sort $(wildcard $(WANWAN_SOUND_DIR)/*.wav))
 
 WASM_CFLAGS := --target=wasm32-unknown-unknown -O2 -g0 -fno-common -std=c11 -D__STDC_HOSTED__=0 \
   -Iwasm/libc/include -Isrc -include common/log.h -DLOOPY_WASM_FRONTEND -DNDEBUG \
@@ -11,7 +18,7 @@ WASM_CFLAGS := --target=wasm32-unknown-unknown -O2 -g0 -fno-common -std=c11 -D__
 WASM_LDFLAGS := --no-entry --export-memory --initial-memory=67108864 --max-memory=536870912 --allow-undefined
 WASM_EXPORTS := \
   --export=loopy_wasm_version --export=loopy_wasm_malloc --export=loopy_wasm_heap_used --export=loopy_wasm_reset_heap --export=loopy_wasm_init --export=loopy_wasm_crc32 \
-  --export=loopy_wasm_load_bios --export=loopy_wasm_load_sound_rom --export=loopy_wasm_load_cart --export=loopy_wasm_load_sram --export=loopy_wasm_start --export=loopy_wasm_soft_reset --export=loopy_wasm_set_paused --export=loopy_wasm_set_port_device --export=loopy_wasm_get_port_device --export=loopy_wasm_frame \
+  --export=loopy_wasm_load_bios --export=loopy_wasm_load_sound_rom --export=loopy_wasm_load_oki_rom --export=loopy_wasm_load_cart --export=loopy_wasm_load_sram --export=loopy_wasm_start --export=loopy_wasm_soft_reset --export=loopy_wasm_set_paused --export=loopy_wasm_set_port_device --export=loopy_wasm_get_port_device --export=loopy_wasm_frame \
   --export=loopy_wasm_get_framebuffer_rgb555 --export=loopy_wasm_get_framebuffer_rgba --export=loopy_wasm_get_width --export=loopy_wasm_get_height --export=loopy_wasm_get_active_height --export=loopy_wasm_get_full_height --export=loopy_wasm_get_y_offset --export=loopy_wasm_get_active_y_offset --export=loopy_wasm_get_status --export=loopy_wasm_get_error --export=loopy_wasm_get_frame_count \
   --export=loopy_wasm_get_audio_rate --export=loopy_wasm_get_audio_ptr --export=loopy_wasm_get_audio_frames --export=loopy_wasm_audio_consume \
   --export=loopy_wasm_save_state --export=loopy_wasm_get_save_ptr --export=loopy_wasm_get_save_size --export=loopy_wasm_prepare_load_state --export=loopy_wasm_load_prepared_state --export=loopy_wasm_load_state --export=loopy_wasm_save_sram --export=loopy_wasm_get_sram_ptr --export=loopy_wasm_get_sram_size \
@@ -20,9 +27,15 @@ WASM_EXPORTS := \
 CORE_SRCS := $(shell find src -name '*.c' | sort | grep -v 'src/main.c' | grep -v 'src/sdl3/main_sdl3.c') wasm/libc/src/loopy_wasm_libc.c wasm/loopy_wasm_core.c
 OBJS := $(patsubst %.c,$(BUILD_DIR)/%.o,$(CORE_SRCS))
 
-.PHONY: all build clean serve
+.PHONY: all build clean serve wanwan-oki-rom
 all: build
-build: $(OUT_WASM)
+build: wanwan-oki-rom $(OUT_WASM)
+wanwan-oki-rom: $(WANWAN_OKI_ROM)
+
+$(WANWAN_OKI_ROM) $(WANWAN_OKI_ORDER) $(WANWAN_OKI_BANK_C) $(WANWAN_OKI_BANK_H): tools/generate_wanwan_oki_bank.py $(WANWAN_OKI_SAMPLE_FILES)
+	$(PYTHON) tools/generate_wanwan_oki_bank.py --sample-dir $(WANWAN_SOUND_DIR) --source-dir src/sound --bin $(WANWAN_OKI_ROM) --order $(WANWAN_OKI_ORDER)
+
+$(BUILD_DIR)/src/sound/wanwan_oki_bank.o: $(WANWAN_OKI_ROM)
 
 $(OUT_WASM): $(OBJS) | $(OUT_DIR)
 	$(WASM_LD) $(WASM_LDFLAGS) $(WASM_EXPORTS) -o $@ $(OBJS)
@@ -38,4 +51,4 @@ serve: build
 	python3 -m http.server $(PORT) --directory $(OUT_DIR)
 
 clean:
-	rm -rf $(BUILD_DIR) $(OUT_WASM)
+	rm -rf $(BUILD_DIR) $(OUT_WASM) $(WANWAN_OKI_ROM) $(WANWAN_OKI_ORDER)
