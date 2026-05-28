@@ -1039,7 +1039,7 @@ static int run_cmdlist_replay(const char *path, uint32_t frame_limit) {
 int main(int argc, char **argv) {
     LoopyLaunchInfo launch;
     if (loopy_parse_common_args(argc, argv, &launch, 0) != 0) {
-        printf("Args: <game ROM> <BIOS> [sound BIOS] [OKI ADPCM ROM] [--device gamepad|mouse] [--mouse|--gamepad] [--record-cmdlist file] [--frames N] [--oki-rom file]\n");
+        printf("Args: <game ROM> <BIOS> [sound BIOS] [OKI ADPCM ROM] [--device gamepad|mouse] [--mouse|--gamepad] [--record-cmdlist file] [--frames N] [--oki-rom file] [--no-wanwan-internal-pcm]\n");
         //printf("Replay: --replay-cmdlist file [--frames N]\n"); 
         return 1;
     }

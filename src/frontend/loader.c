@@ -36,6 +36,7 @@ int loopy_parse_common_args(int argc, char **argv, LoopyLaunchInfo *out, int def
     if (!out) return -1;
     memset(out, 0, sizeof(*out));
     out->frames = default_frames;
+    out->wanwan_replacement_pcm_enabled = 1;
     out->y4m_start = 1;
     out->y4m_step = 1;
     out->lr_hold_left_start = 1;
@@ -94,6 +95,16 @@ int loopy_parse_common_args(int argc, char **argv, LoopyLaunchInfo *out, int def
         } else if (strcmp(argv[argi], "--wanwan-oki-montage-wav") == 0 && argi + 1 < argc) {
             out->wanwan_oki_montage_path = argv[argi + 1];
             argi += 2;
+        } else if (strcmp(argv[argi], "--no-wanwan-internal-pcm") == 0 ||
+                   strcmp(argv[argi], "--disable-wanwan-internal-pcm") == 0 ||
+                   strcmp(argv[argi], "--no-wanwan-replacement-pcm") == 0) {
+            out->wanwan_replacement_pcm_enabled = 0;
+            argi++;
+        } else if (strcmp(argv[argi], "--wanwan-internal-pcm") == 0 ||
+                   strcmp(argv[argi], "--enable-wanwan-internal-pcm") == 0 ||
+                   strcmp(argv[argi], "--wanwan-replacement-pcm") == 0) {
+            out->wanwan_replacement_pcm_enabled = 1;
+            argi++;
         } else if (strcmp(argv[argi], "--y4m-start") == 0 && argi + 1 < argc) {
             out->y4m_start = atoi(argv[argi + 1]);
             if (out->y4m_start < 1) out->y4m_start = 1;
@@ -226,6 +237,7 @@ int loopy_load_config(const LoopyLaunchInfo *launch, ConfigSystemInfo *config) {
     }
 
     config->cart_is_wanwan = loopy_cart_rom_is_wanwan(config->cart.rom.data, config->cart.rom.size);
+    config->wanwan_replacement_pcm_enabled = launch->wanwan_replacement_pcm_enabled ? 1 : 0;
 
     uint32_t sram_start, sram_end;
     memcpy(&sram_start, config->cart.rom.data + 0x10, 4);

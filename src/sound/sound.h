@@ -14,7 +14,7 @@
 #define SOUND_EXP_DATA_START 0x040A0000u
 #define SOUND_EXP_DATA_END 0x040C0000u
 
-void sound_initialize(const ByteBuffer *sound_rom, const ByteBuffer *oki_adpcm_rom, int cart_is_wanwan);
+void sound_initialize(const ByteBuffer *sound_rom, const ByteBuffer *oki_adpcm_rom, int cart_is_wanwan, int wanwan_replacement_pcm_enabled);
 void sound_shutdown(void);
 uint8_t sound_ctrl_read8(uint32_t addr);
 uint16_t sound_ctrl_read16(uint32_t addr);

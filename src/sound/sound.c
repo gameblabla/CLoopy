@@ -152,7 +152,7 @@ static void sound_timeref(uint64_t param, int cycles_late) {
 }
 #endif
 
-void sound_initialize(const ByteBuffer *sound_rom, const ByteBuffer *oki_adpcm_rom, int cart_is_wanwan) {
+void sound_initialize(const ByteBuffer *sound_rom, const ByteBuffer *oki_adpcm_rom, int cart_is_wanwan, int wanwan_replacement_pcm_enabled) {
     sound_muted = false;
     sound_paused = false;
     volume_level = 1.0f;
@@ -166,7 +166,11 @@ void sound_initialize(const ByteBuffer *sound_rom, const ByteBuffer *oki_adpcm_r
     buffer_size = SOUND_TARGET_BUFFER_SIZE;
     const void *oki_data = (oki_adpcm_rom && oki_adpcm_rom->data && oki_adpcm_rom->size) ? oki_adpcm_rom->data : NULL;
     uint32_t oki_size = (oki_adpcm_rom && oki_adpcm_rom->data && oki_adpcm_rom->size && oki_adpcm_rom->size <= 0xFFFFFFFFu) ? (uint32_t)oki_adpcm_rom->size : 0u;
-    cart_adpcm = oki_adpcm_create((float)sample_rate, oki_data, oki_size, cart_is_wanwan);
+    int use_wanwan_replacement = cart_is_wanwan && wanwan_replacement_pcm_enabled;
+    cart_adpcm = oki_adpcm_create((float)sample_rate, oki_data, oki_size, use_wanwan_replacement);
+    if (cart_is_wanwan && !oki_data && !use_wanwan_replacement) {
+        fprintf(stderr, "[Sound] Wanwan MSM6653A-457 replacement PCM bank disabled; cartridge ADPCM will be silent unless an OKI ROM is supplied.\n");
+    }
     if (!cart_adpcm) fprintf(stderr, "[Sound] Failed to initialize OKI ADPCM cart engine\n");
     sound_rom_present = sound_rom && sound_rom->data && sound_rom->size > 0;
     if (!sound_rom_present) {

@@ -115,6 +115,7 @@ static void clear_config(void)
 {
     loopy_config_free(&cfg);
     memset(&cfg, 0, sizeof(cfg));
+    cfg.wanwan_replacement_pcm_enabled = 1;
 }
 
 static int copy_into_buffer(ByteBuffer *dst, const void *src, uint32_t size)
@@ -189,6 +190,7 @@ void loopy_wasm_reset_heap(void)
     clear_config();
     __loopy_wasm_heap_reset();
     memset(&cfg, 0, sizeof(cfg));
+    cfg.wanwan_replacement_pcm_enabled = 1;
     state_buf = NULL;
     state_buf_size = 0;
     state_load_buf = NULL;
@@ -241,6 +243,12 @@ uint32_t loopy_wasm_load_oki_rom(uint32_t ptr, uint32_t size)
     if(!copy_into_buffer(&cfg.oki_adpcm_rom, (const void*)(uintptr_t)ptr, size)) { set_error(ERR_BAD_SOUND); return 0; }
     update_loaded_status();
     return crc32_update(0, cfg.oki_adpcm_rom.data, (uint32_t)cfg.oki_adpcm_rom.size);
+}
+
+__attribute__((export_name("loopy_wasm_set_wanwan_replacement_pcm")))
+void loopy_wasm_set_wanwan_replacement_pcm(uint32_t enabled)
+{
+    cfg.wanwan_replacement_pcm_enabled = enabled ? 1 : 0;
 }
 
 __attribute__((export_name("loopy_wasm_load_cart")))

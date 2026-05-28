@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wanwan OKI ADPCM ROM editor</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">Casio Loopy / Wanwan Aijou Monogatari</p>
+      <h1>OKI MSM6653A-457 ADPCM ROM editor</h1>
+      <p class="lede">Browser-only editor for building a replacement Wanwan cartridge ADPCM sample binary. Upload WAV, MP3, OGG, FLAC, or any format your browser can decode; the tool resamples to the OKI rate, encodes to 4-bit ADPCM, packs phrases into the Wanwan-compatible table ROM, and lets you preview the decoded result. Existing OKI binary ROMs can also be imported, decoded into slots, played, edited, and exported again.</p>
+    </div>
+    <div class="actions">
+      <button id="exportRom" class="primary">Export ROM .bin</button>
+      <button id="exportProject">Export project</button>
+      <label class="file-button">Import project<input id="importProject" type="file" accept="application/json,.json"></label>
+      <label class="file-button">Import ROM .bin<input id="importRom" type="file" accept="application/octet-stream,.bin"></label>
+    </div>
+  </header>
+
+  <main>
+    <section class="notice">
+      <strong>Bank naming policy:</strong> only trace-grounded commands are named. Every other slot is intentionally marked as a guess. The assumption column is based on the earlier original-sample categories, not on the freely licensed replacement pack.
+    </section>
+
+    <section class="controls-panel">
+      <div class="control-block">
+        <label for="targetRate">ADPCM rate</label>
+        <select id="targetRate">
+          <option value="8000" selected>8000 Hz (current emulator default)</option>
+          <option value="7812.5">7812.5 Hz</option>
+          <option value="64000">64000 Hz (diagnostic, raw OKI clock/64)</option>
+        </select>
+      </div>
+      <div class="control-block">
+        <label for="defaultPeak">Default target peak</label>
+        <input id="defaultPeak" type="number" min="200" max="2047" value="1450">
+      </div>
+      <div class="control-block">
+        <label for="defaultMaxMs">Default max length, ms</label>
+        <input id="defaultMaxMs" type="number" min="0" max="5000" value="0">
+        <small>0 keeps full active audio.</small>
+      </div>
+      <div class="control-block checkrow">
+        <label><input id="trimActive" type="checkbox" checked> Trim silence</label>
+        <label><input id="dcBlock" type="checkbox" checked> DC blocker</label>
+      </div>
+    </section>
+
+    <section class="summary-grid">
+      <div><span id="romSize">512</span><small>ROM bytes</small></div>
+      <div><span id="filledCount">0</span><small>Filled command slots</small></div>
+      <div><span id="knownCount">2</span><small>Trace-known slots</small></div>
+      <div><span id="warningCount">20</span><small>Guessed slots</small></div>
+    </section>
+
+    <section class="batch-panel">
+      <div>
+        <h2>Batch tools</h2>
+        <p>Drop multiple audio files here. Files with command numbers in the filename, such as <code>cmd13_bark.wav</code>, <code>0x16.wav</code>, or <code>16 dog bark.ogg</code>, are assigned automatically. Others are left for manual assignment.</p>
+      </div>
+      <label class="drop-zone" id="batchDrop">Drop audio files or click to browse<input id="batchFiles" type="file" multiple accept="audio/*,.wav,.mp3,.ogg,.flac,.m4a,.aac"></label>
+      <div id="batchLog" class="batch-log"></div>
+    </section>
+
+    <section class="slots" id="slots"></section>
+
+    <section class="export-panel">
+      <h2>Preview and export</h2>
+      <div class="button-row">
+        <button id="buildMontage">Build 22-slot preview montage</button>
+        <button id="downloadOrder">Download order text</button>
+        <button id="clearAll" class="danger">Clear all uploaded audio</button>
+      </div>
+      <audio id="montageAudio" controls></audio>
+      <pre id="orderText"></pre>
+    </section>
+  </main>
+
+  <template id="slotTemplate">
+    <article class="slot-card">
+      <header>
+        <div>
+          <span class="cmd"></span>
+          <h3></h3>
+        </div>
+        <span class="confidence"></span>
+      </header>
+      <p class="assumption"></p>
+      <label class="file-button wide">Upload audio<input class="audioInput" type="file" accept="audio/*,.wav,.mp3,.ogg,.flac,.m4a,.aac"></label>
+      <div class="slot-settings">
+        <label>Peak <input class="peakInput" type="number" min="200" max="2047" value="1450"></label>
+        <label>Pitch/time <input class="pitchInput" type="number" min="0.25" max="4" step="0.01" value="1"></label>
+        <label>Max ms <input class="maxMsInput" type="number" min="0" max="5000" value="0"></label>
+      </div>
+      <div class="slot-status"></div>
+      <div class="slot-actions">
+        <button class="previewBtn" disabled>Preview decoded</button>
+        <button class="downloadWavBtn" disabled>Decoded WAV</button>
+        <button class="clearBtn" disabled>Clear</button>
+      </div>
+      <audio class="previewAudio" controls></audio>
+    </article>
+  </template>
+
+  <script src="editor.js"></script>
+</body>
+</html>

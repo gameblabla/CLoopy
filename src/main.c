@@ -329,7 +329,7 @@ static int run_cmdlist_print_extract(const LoopyLaunchInfo *launch) {
 int main(int argc, char **argv) {
     LoopyLaunchInfo launch;
     if (loopy_parse_common_args(argc, argv, &launch, 4800) != 0) {
-        printf("Args: <game ROM> <BIOS> [sound BIOS] [OKI ADPCM ROM] [--frames N] [--device gamepad|mouse] [--mouse|--gamepad] [--record-y4m file] [--record-wav file] [--load-state file] [--oki-rom file] [--wanwan-oki-montage-wav file] [--y4m-start N] [--y4m-step N] [--auto-cascadefx] [--cascadefx-watch] [--cascadefx-prof] [--cascadefx-dpad-test] [--cascadefx-dpad-prehold-test] [--cascadefx-dpad-tap-test] [--cascadefx-pad-trace] [--auto-anarch] [--anarch-prof] [--lr-hold-left] [--lr-hold-left-start N] [--lr-mouse-dx N] [--printer-output-dir dir] [--printer-trace]\n");
+        printf("Args: <game ROM> <BIOS> [sound BIOS] [OKI ADPCM ROM] [--frames N] [--device gamepad|mouse] [--mouse|--gamepad] [--record-y4m file] [--record-wav file] [--load-state file] [--oki-rom file] [--no-wanwan-internal-pcm] [--wanwan-oki-montage-wav file] [--y4m-start N] [--y4m-step N] [--auto-cascadefx] [--cascadefx-watch] [--cascadefx-prof] [--cascadefx-dpad-test] [--cascadefx-dpad-prehold-test] [--cascadefx-dpad-tap-test] [--cascadefx-pad-trace] [--auto-anarch] [--anarch-prof] [--lr-hold-left] [--lr-hold-left-start N] [--lr-mouse-dx N] [--printer-output-dir dir] [--printer-trace]\n");
         printf("Default: --frames 4800, which waits long enough for Little Romance and the other retail title screens under the MAME-derived SH7021 core.\n");
         return 1;
     }

@@ -11,6 +11,30 @@
     <main class="stage">
       <div id="screenFrame" class="screen-frame" tabindex="0" aria-label="Casio Loopy video output">
         <canvas id="video" width="256" height="240"></canvas>
+        <div id="touchGamepad" class="touch-gamepad" aria-hidden="true">
+          <div id="touchStick" class="touch-stick" aria-label="Virtual directional pad">
+            <div class="touch-stick-cardinals" aria-hidden="true">
+              <span class="touch-cardinal up">▲</span>
+              <span class="touch-cardinal right">▶</span>
+              <span class="touch-cardinal down">▼</span>
+              <span class="touch-cardinal left">◀</span>
+            </div>
+            <div id="touchKnob" class="touch-knob"></div>
+          </div>
+          <div class="touch-center-controls">
+            <button type="button" class="touch-btn system" data-button="Start"><span>START</span></button>
+          </div>
+          <div class="touch-shoulders" aria-label="Virtual shoulder buttons">
+            <button type="button" class="touch-btn shoulder" data-button="L1"><span>L1</span></button>
+            <button type="button" class="touch-btn shoulder" data-button="R1"><span>R1</span></button>
+          </div>
+          <div class="touch-buttons" aria-label="Virtual action buttons">
+            <button type="button" class="touch-btn action" data-button="A"><span>A</span></button>
+            <button type="button" class="touch-btn action" data-button="B"><span>B</span></button>
+            <button type="button" class="touch-btn action" data-button="C"><span>C</span></button>
+            <button type="button" class="touch-btn action" data-button="D"><span>D</span></button>
+          </div>
+        </div>
         <div id="fpsCounter" class="fps-counter hidden">0.0 FPS</div>
         <div class="overlay-actions">
           <button id="menuToggle" class="icon-button" title="Menu" aria-label="Menu">☰</button>
@@ -70,13 +94,18 @@
         <div class="row input-actions"><button id="captureMouse" type="button">Capture mouse</button></div>
         <div id="mouseCaptureStatus" class="muted">Mouse capture inactive</div>
         <div id="controlMap" class="control-map"></div>
-        <p class="hint">Click a mapping, then press a key. In Mouse mode, click the screen or Capture mouse to lock pointer movement; Esc releases it. Keyboard shortcuts: F1 menu, F5 save state, F7 load state, F11 fullscreen, Ctrl+M mouse capture.</p>
+        <div id="touchOptions" class="touch-options">
+          <label>On-screen gamepad opacity
+            <input id="touchOpacity" type="range" min="20" max="100" step="5">
+          </label>
+        </div>
+        <p class="hint">Click a mapping, then press a key. On mobile/coarse-pointer browsers, the on-screen gamepad appears automatically. In Mouse mode, click the screen or Capture mouse to lock pointer movement; Esc releases it. Keyboard shortcuts: F1 menu, F5 save state, F7 load state, F11 fullscreen, Ctrl+M mouse capture.</p>
       </section>
 
       <section class="panel-section">
         <h2>Save states</h2>
         <div class="row"><button id="pauseToggle">Pause</button><button id="resetButton">Soft reset</button></div>
-        <label>Slot <select id="stateSlot"></select></label>
+        <label class="slot-select-row">Slot <select id="stateSlot"></select></label>
         <div class="row"><button id="saveState">Save</button><button id="loadState">Load</button></div>
       </section>
 
@@ -84,6 +113,11 @@
         <h2>Storage</h2>
         <p id="storageStatus" class="muted">checking browser storage...</p>
         <button id="clearStorage">Clear stored ROMs, SRAM, config, and states</button>
+        <div class="external-tool-box" aria-label="Wanwan PCM sample editor link">
+          <h3>Wanwan PCM sample editor</h3>
+          <p>Create or edit a MSM6653A-compatible OKI ADPCM sample ROM for Wanwan Aijou Monogatari.</p>
+          <a class="button-link wide" href="https://gameblabla.github.io/casloopy/wanwan-oki-editor/" target="_blank" rel="noopener noreferrer">Open PCM sample editor</a>
+        </div>
       </section>
     </aside>
   </div>
@@ -110,7 +144,8 @@
           <h3>Wanwan OKI sample ROM <span class="muted">optional</span></h3>
           <p id="okiStatus" class="muted">missing; freely licensed replacement ROM will be used</p>
           <label class="file-button wide">Store MSM6653A-compatible sample ROM<input id="okiFile" type="file" accept=".bin,.rom,application/octet-stream"></label>
-          <p class="hint">Only Wanwan Aijou Monogatari uses this cartridge ADPCM ROM. For Wanwan, if none is provided, the built-in freely licensed replacement bank is used. A user-provided ROM takes precedence.</p>
+          <label class="check-row"><input id="wanwanReplacementPcm" type="checkbox" checked> Use built-in freely licensed Wanwan replacement PCM bank when no OKI ROM is supplied</label>
+          <p class="hint">Only Wanwan Aijou Monogatari uses this cartridge ADPCM ROM. For Wanwan, if none is provided, this replacement bank is used only when the checkbox is enabled. A user-provided ROM takes precedence.</p>
         </article>
       </div>
       <label class="file-button wide">Load cartridge now<input id="startupCartFile" type="file" accept=".bin,.rom,application/octet-stream"></label>

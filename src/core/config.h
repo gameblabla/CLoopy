@@ -25,6 +25,7 @@ typedef struct ConfigSystemInfo {
     ByteBuffer sound_rom;
     ByteBuffer oki_adpcm_rom;
     int cart_is_wanwan;
+    int wanwan_replacement_pcm_enabled;
 } ConfigSystemInfo;
 
 void byte_buffer_init(ByteBuffer *buf);

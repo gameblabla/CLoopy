@@ -8,6 +8,13 @@ button:hover, .file-button:hover, select:hover, .button-link:hover { border-colo
 .file-button { display:inline-flex; align-items:center; justify-content:center; gap:.5rem; position:relative; overflow:hidden; }
 .file-button input { position:absolute; inset:0; opacity:0; cursor:pointer; }
 .file-button.wide { width:100%; min-height:44px; margin-top:.5rem; }
+
+.button-link.wide { display:flex; align-items:center; justify-content:center; width:100%; min-height:44px; margin-top:.5rem; }
+.slot-select-row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:.45rem 0 .55rem; }
+.slot-select-row select { min-width:9rem; }
+.external-tool-box { margin-top:12px; padding:12px; border:1px solid rgba(90,215,255,.32); border-radius:14px; background:rgba(90,215,255,.06); }
+.external-tool-box h3 { margin:0 0 .25rem; }
+.external-tool-box p { margin:.25rem 0 .65rem; }
 .app-shell { display:grid; grid-template-columns:1fr minmax(320px,380px); height:100vh; }
 .stage { min-width:0; min-height:0; padding:14px; }
 .screen-frame { position:relative; display:grid; place-items:center; width:100%; height:100%; background:#000; outline:none; overflow:hidden; box-shadow:0 18px 60px rgba(0,0,0,.35); }
@@ -50,3 +57,60 @@ body.fullscreen-emulation .stage { width:100dvw !important; height:100dvh !impor
 body.fullscreen-emulation .side-menu, body.fullscreen-emulation #menuToggle { display:none !important; }
 .screen-frame.fullscreen-active { position:fixed !important; inset:0 !important; width:100dvw !important; height:100dvh !important; }
 @media (max-width:900px) { html,body { overflow:auto; } .app-shell { grid-template-columns:1fr; height:auto; min-height:100vh; } .stage { min-height:58vh; } .side-menu { position:fixed; right:0; top:0; width:min(380px,94vw); transform:translateX(105%); transition:transform .18s ease; z-index:10; box-shadow:-20px 0 60px rgba(0,0,0,.45); } .side-menu.open { transform:translateX(0); } .bios-grid { grid-template-columns:1fr; } }
+
+/* Mobile / coarse-pointer virtual gamepad */
+.touch-gamepad {
+  display:none;
+  position:fixed;
+  inset:0;
+  width:100vw;
+  height:100vh;
+  width:100dvw;
+  height:100dvh;
+  z-index:45;
+  pointer-events:none;
+  opacity:var(--touch-opacity,.72);
+  touch-action:none;
+  user-select:none;
+  -webkit-user-select:none;
+}
+.touch-stick {
+  position:absolute;
+  left:18px;
+  bottom:22px;
+  left:calc(18px + env(safe-area-inset-left));
+  bottom:calc(22px + env(safe-area-inset-bottom));
+  width:clamp(128px,21vmin,172px);
+  height:clamp(128px,21vmin,172px);
+  border-radius:50%;
+  border:2px solid rgba(255,255,255,.32);
+  background:radial-gradient(circle at 50% 50%, rgba(255,255,255,.11) 0 27%, rgba(255,255,255,.05) 28% 47%, transparent 48%), rgba(8,14,25,.48);
+  box-shadow:0 14px 36px rgba(0,0,0,.42), inset 0 0 30px rgba(90,215,255,.12);
+  backdrop-filter:blur(10px);
+  pointer-events:auto;
+  touch-action:none;
+}
+.touch-stick::before,.touch-stick::after{content:"";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:rgba(255,255,255,.18);border-radius:999px;pointer-events:none;}
+.touch-stick::before{width:64%;height:2px;}
+.touch-stick::after{width:2px;height:64%;}
+.touch-stick-cardinals{position:absolute;inset:0;color:rgba(255,255,255,.42);font-size:.78rem;font-weight:900;pointer-events:none;}
+.touch-cardinal{position:absolute;transform:translate(-50%,-50%);line-height:1;}
+.touch-cardinal.up{left:50%;top:16%;}.touch-cardinal.right{left:84%;top:50%;}.touch-cardinal.down{left:50%;top:84%;}.touch-cardinal.left{left:16%;top:50%;}
+.touch-knob{position:absolute;left:50%;top:50%;width:43%;height:43%;border-radius:50%;transform:translate(calc(-50% + var(--stick-x,0px)),calc(-50% + var(--stick-y,0px)));background:radial-gradient(circle at 35% 30%,rgba(255,255,255,.98),rgba(230,242,255,.84) 48%,rgba(88,211,255,.72));border:1px solid rgba(255,255,255,.66);box-shadow:0 9px 25px rgba(0,0,0,.45), inset 0 -8px 14px rgba(0,0,0,.18);will-change:transform;pointer-events:none;}
+.touch-buttons{position:absolute;right:18px;bottom:24px;right:calc(18px + env(safe-area-inset-right));bottom:calc(24px + env(safe-area-inset-bottom));width:clamp(178px,28vmin,232px);height:clamp(152px,24vmin,198px);pointer-events:none;touch-action:none;}
+.touch-btn{border:1px solid rgba(255,255,255,.30);background:rgba(9,15,26,.54);color:#fff;touch-action:none;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;box-shadow:0 10px 26px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.12);backdrop-filter:blur(10px);}
+.touch-btn.action{position:absolute;width:clamp(60px,9vmin,78px);height:clamp(60px,9vmin,78px);border-radius:50%;padding:0;display:grid;place-items:center;font-size:1.05rem;font-weight:900;pointer-events:auto;}
+.touch-btn[data-button="A"]{left:0;bottom:0;}.touch-btn[data-button="B"]{right:0;bottom:0;}.touch-btn[data-button="C"]{left:0;top:0;}.touch-btn[data-button="D"]{right:0;top:0;}
+.touch-center-controls{position:absolute;left:50%;bottom:24px;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%);display:flex;gap:12px;pointer-events:none;}
+.touch-btn.system{min-width:86px;height:40px;border-radius:999px;padding:0 16px;font-size:.78rem;font-weight:900;letter-spacing:.05em;pointer-events:auto;}
+.touch-shoulders{position:absolute;left:50%;top:18px;top:calc(18px + env(safe-area-inset-top));transform:translateX(-50%);display:flex;gap:18px;pointer-events:none;}
+.touch-btn.shoulder{min-width:74px;height:42px;border-radius:999px;padding:0 18px;font-size:.82rem;font-weight:900;pointer-events:auto;}
+.touch-btn.active,.touch-stick.active{border-color:rgba(90,215,255,.94);background-color:rgba(54,150,255,.30);box-shadow:0 0 0 2px rgba(90,215,255,.22),0 12px 30px rgba(0,0,0,.42),inset 0 0 22px rgba(90,215,255,.16);}
+.touch-options{display:none;margin:10px 0;}
+.touch-options input{width:100%;}
+body.touch-controls-active .touch-gamepad{display:block;}
+body.touch-controls-active .touch-options{display:block;}
+body.menu-open .touch-gamepad{display:none!important;}
+@media (hover:none) and (pointer:coarse),(any-pointer:coarse),(max-width:980px),(max-height:620px){.touch-gamepad{display:block;}.touch-options{display:block;}}
+@media (orientation:landscape) and (max-height:620px){.touch-stick{top:50%;bottom:auto;transform:translateY(-50%);width:clamp(118px,29vh,150px);height:clamp(118px,29vh,150px);} .touch-buttons{top:50%;bottom:auto;transform:translateY(-50%);width:clamp(168px,36vh,212px);height:clamp(136px,29vh,172px);} .touch-btn.action{width:clamp(54px,13vh,66px);height:clamp(54px,13vh,66px);} .touch-center-controls{bottom:14px;bottom:calc(14px + env(safe-area-inset-bottom));} .touch-shoulders{top:10px;top:calc(10px + env(safe-area-inset-top));}}
+@media (orientation:portrait) and (max-width:640px){.touch-stick{width:clamp(136px,34vw,170px);height:clamp(136px,34vw,170px);} .touch-buttons{width:clamp(178px,48vw,236px);height:clamp(152px,41vw,198px);} .touch-center-controls{bottom:calc(178px + env(safe-area-inset-bottom));}.touch-shoulders{top:auto;bottom:calc(224px + env(safe-area-inset-bottom));}}
