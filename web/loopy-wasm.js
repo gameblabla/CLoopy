@@ -94,7 +94,52 @@ async function startOrRestart(){ if (!activeCartBytes) throw new Error('Load a c
   const ok = wasm.loopy_wasm_start(config.portDevice === 'mouse' ? 1 : 0); if (!ok) throw new Error(`backend rejected startup, error 0x${(wasm.loopy_wasm_get_error()>>>0).toString(16)}`); autoPausedForHiddenTab = false; paused = false; running = true; applyPortDevice({status:false}); clearAudioQueue(); resetFrameLimiter(); els.pauseToggle.textContent = 'Pause'; els.startupModal.classList.remove('open'); const soundText = soundCrc == null ? 'sound ROM omitted' : `sound ${fmtCrc(soundCrc)}`; const needsOki = activeCartIsWanwan(); const okiText = needsOki ? (okiCrc == null ? (config.wanwanReplacementPcm === false ? 'Wanwan OKI/PCM disabled' : 'Wanwan OKI replacement bank') : `Wanwan OKI user ROM ${fmtCrc(okiCrc)}`) : 'no Wanwan OKI ROM needed'; updateStorageStatus(`running; BIOS ${fmtCrc(biosCrc)}, ${soundText}, ${okiText}, input ${actualPortDeviceName()}`, (biosCrc===EXPECTED_BIOS_CRC && (soundCrc == null || soundCrc===EXPECTED_SOUND_CRC)) ? 'ok' : 'warn'); }
 async function softReset(){ if (!running) { updateStorageStatus('no running machine to reset', 'warn'); return; } const ok = wasm?.loopy_wasm_soft_reset?.(); if (!ok) { updateStorageStatus('soft reset failed', 'bad'); return; } pressed.clear(); resetMouseTracking(); clearAudioQueue(); resetFrameLimiter(); paused = false; autoPausedForHiddenTab = false; els.pauseToggle.textContent = 'Pause'; applyPortDevice({status:false}); await persistSram().catch(()=>{}); updateStorageStatus(`soft reset; input ${actualPortDeviceName()}`, 'ok'); renderOnce(); }
 function clearCanvasToBlack(){ ctx.fillStyle = '#000'; ctx.fillRect(0,0,els.canvas.width,els.canvas.height); }
-function resizeVideoPresentation(){ const w = wasm?.loopy_wasm_get_width?.() || els.canvas.width || 256; const h = wasm?.loopy_wasm_get_height?.() || els.canvas.height || 240; els.screenFrame.dataset.aspect = config.video.aspect; if (config.video.aspect === 'stretch') { els.canvas.style.width = '100%'; els.canvas.style.height = '100%'; return; } const rect = els.screenFrame.getBoundingClientRect(); const maxW = Math.max(1, rect.width); const maxH = Math.max(1, rect.height); const aspect = config.video.aspect === '4:3' ? (4/3) : (w / h); let cssW = maxW; let cssH = cssW / aspect; if (cssH > maxH) { cssH = maxH; cssW = cssH * aspect; } els.canvas.style.width = `${Math.max(1, Math.floor(cssW))}px`; els.canvas.style.height = `${Math.max(1, Math.floor(cssH))}px`; }
+function normalizedAspectMode(){
+  const mode = config.video?.aspect || 'native';
+  return mode === '4:3' ? 'keep' : mode;
+}
+function resizeVideoPresentation(){
+  const w = wasm?.loopy_wasm_get_width?.() || els.canvas.width || 256;
+  const h = wasm?.loopy_wasm_get_height?.() || els.canvas.height || 240;
+  const mode = normalizedAspectMode();
+  els.screenFrame.dataset.aspect = mode;
+  const rect = els.screenFrame.getBoundingClientRect();
+  const maxW = Math.max(1, Math.floor(rect.width));
+  const maxH = Math.max(1, Math.floor(rect.height));
+  let cssW = w;
+  let cssH = h;
+  if (mode === 'stretch') {
+    cssW = maxW;
+    cssH = maxH;
+  } else if (mode === 'native') {
+    const fitScale = Math.min(maxW / w, maxH / h);
+    if (fitScale >= 1) {
+      const integerScale = Math.max(1, Math.floor(fitScale));
+      cssW = w * integerScale;
+      cssH = h * integerScale;
+    } else {
+      /* Tiny viewports cannot fit a 1x canvas; fall back to uniform contain scaling
+         rather than overflowing or cropping the emulated picture. */
+      const aspect = w / h;
+      cssW = maxW;
+      cssH = cssW / aspect;
+      if (cssH > maxH) {
+        cssH = maxH;
+        cssW = cssH * aspect;
+      }
+    }
+  } else {
+    const aspect = w / h;
+    cssH = maxH;
+    cssW = cssH * aspect;
+    if (cssW > maxW) {
+      cssW = maxW;
+      cssH = cssW / aspect;
+    }
+  }
+  els.canvas.style.width = `${Math.max(1, Math.floor(cssW))}px`;
+  els.canvas.style.height = `${Math.max(1, Math.floor(cssH))}px`;
+}
 function renderOnce(){ if (!wasm) { resizeVideoPresentation(); return; } const w = wasm.loopy_wasm_get_width(); const h = wasm.loopy_wasm_get_height(); if (els.canvas.width !== w || els.canvas.height !== h) { els.canvas.width = w; els.canvas.height = h; imageData = null; } const ptr = wasm.loopy_wasm_get_framebuffer_rgba(); if (ptr) { const src = wasmU8().subarray(ptr, ptr + w*h*4); if (!imageData || imageData.width !== w || imageData.height !== h) imageData = new ImageData(w,h); imageData.data.set(src); ctx.putImageData(imageData,0,0); } els.runtimeStatus.textContent = STATUS_TEXT[wasm.loopy_wasm_get_status?.() ?? 0] || 'unknown'; const ah = wasm.loopy_wasm_get_active_height?.() || h; els.runtimeResolution.textContent = ah === h ? `${w} × ${h}` : `${w} × ${h} (${ah} active)`; els.runtimeFrame.textContent = String(wasm.loopy_wasm_get_frame_count?.() ?? 0); els.runtimeCart.textContent = activeCartName || 'none'; els.canvas.classList.toggle('smooth', !!config.video.smoothUpscale); els.canvas.classList.toggle('nearest', !config.video.smoothUpscale); els.screenFrame.classList.toggle('scanlines', !!config.video.scanlines); els.fpsCounter.classList.toggle('hidden', !config.video.showFps); els.fpsCounter.textContent = `${fpsValue.toFixed(1)} FPS`; resizeVideoPresentation(); }
 function buttonsMask(){ let mask = 0; for (const [name, bit] of BUTTONS) if (pressed.has(config.keys[name]) || virtualPressed.has(name)) mask |= bit; return mask >>> 0; }
 function applyTouchOpacity(){ const value = Math.max(0.2, Math.min(1.0, Number(config.touchGamepad?.opacity ?? 0.72))); els.touchGamepad?.style.setProperty('--touch-opacity', String(value)); }
@@ -129,7 +174,7 @@ function ensureAudioOutputInstalled(){ installAudioWorklet().then(ok=>{ if(!ok) 
 function pullAudio(){ if (!wasm) return; let frames = wasm.loopy_wasm_get_audio_frames(); if (!frames) return; if (paused) { wasm.loopy_wasm_audio_consume(frames); return; } if (frames > AUDIO_MAX_POST_FRAMES) { wasm.loopy_wasm_audio_consume(frames - AUDIO_MAX_POST_FRAMES); frames = AUDIO_MAX_POST_FRAMES; } const ptr = wasm.loopy_wasm_get_audio_ptr(); const samples = wasmU8().slice(ptr, ptr + frames*4); wasm.loopy_wasm_audio_consume(frames); if (audioNode?.port && audioWorkletReady) audioNode.port.postMessage({type:'audio', generation:audioGeneration, buffer:samples.buffer}, [samples.buffer]); else { audioQueue.push(new Int16Array(samples.buffer)); audioQueueFrames += frames; if (audioQueueFrames > AUDIO_MAX_POST_FRAMES) dropFallbackAudioFrames(audioQueueFrames - AUDIO_MAX_POST_FRAMES); } }
 function rebuildControlMap(){ els.controlMap.innerHTML = ''; for (const [name] of BUTTONS) { const row=document.createElement('div'); row.className='map-row'; row.dataset.name=name; const label=document.createElement('span'); label.textContent=name; const btn=document.createElement('button'); btn.textContent=config.keys[name]; btn.addEventListener('click',()=>{ remapTarget=name; document.querySelectorAll('.map-row').forEach(r=>r.classList.toggle('pending', r.dataset.name===name)); btn.textContent='press key...'; els.screenFrame.focus(); }); row.append(label,btn); els.controlMap.append(row); } }
 function populateStateSlots(){ els.stateSlot.innerHTML=''; for(let i=0;i<10;i++){ const opt=document.createElement('option'); opt.value=String(i); opt.textContent=`Slot ${i}`; els.stateSlot.append(opt); } }
-function applyConfigToControls(){ els.aspectMode.value = config.video.aspect; els.smoothUpscale.checked = !!config.video.smoothUpscale; els.scanlines.checked = !!config.video.scanlines; els.showFps.checked = config.video.showFps !== false; if (els.wanwanReplacementPcm) els.wanwanReplacementPcm.checked = config.wanwanReplacementPcm !== false; els.stateSlot.value = String(config.stateSlot); els.portDevice.value = config.portDevice; if (els.touchOpacity) els.touchOpacity.value = String(Math.round((config.touchGamepad?.opacity ?? 0.72) * 100)); applyTouchOpacity(); updateTouchControlsAvailability(); renderOnce(); }
+function applyConfigToControls(){ if (config.video.aspect === '4:3') config.video.aspect = 'keep'; els.aspectMode.value = normalizedAspectMode(); els.smoothUpscale.checked = !!config.video.smoothUpscale; els.scanlines.checked = !!config.video.scanlines; els.showFps.checked = config.video.showFps !== false; if (els.wanwanReplacementPcm) els.wanwanReplacementPcm.checked = config.wanwanReplacementPcm !== false; els.stateSlot.value = String(config.stateSlot); els.portDevice.value = config.portDevice; if (els.touchOpacity) els.touchOpacity.value = String(Math.round((config.touchGamepad?.opacity ?? 0.72) * 100)); applyTouchOpacity(); updateTouchControlsAvailability(); renderOnce(); }
 function resetMouseTracking(){ mouseLastX = 0; mouseLastY = 0; mouseLastValid = false; mouseFracX = 0; mouseFracY = 0; mouseDX = 0; mouseDY = 0; mouseButtons = 0; }
 function actualPortDeviceName(){ return wasm?.loopy_wasm_get_port_device?.() ? 'mouse' : 'gamepad'; }
 function syncMouseCaptureUI(){ const locked = document.pointerLockElement === els.canvas || document.pointerLockElement === els.screenFrame; if(els.captureMouse) els.captureMouse.textContent = locked ? 'Release mouse' : 'Capture mouse'; if(els.mouseCaptureStatus) els.mouseCaptureStatus.textContent = config.portDevice === 'mouse' ? (locked ? 'Mouse captured; press Esc to release.' : 'Mouse mode active; click the screen or Capture mouse to lock pointer movement.') : 'Gamepad mode active; mouse capture disabled.'; }
