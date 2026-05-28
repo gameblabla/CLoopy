@@ -109,8 +109,13 @@ function resizeVideoPresentation(){
   let cssW = w;
   let cssH = h;
   if (mode === 'stretch') {
-    cssW = maxW;
-    cssH = maxH;
+    /* Stretch is intentionally a pure CSS fill mode.  Do not leave integer/native
+       pixel dimensions on the canvas, because some mobile browsers combine those
+       with grid centering before applying the 100% rule, which can clip the right
+       or lower part of the frame. */
+    els.canvas.style.width = '100%';
+    els.canvas.style.height = '100%';
+    return;
   } else if (mode === 'native') {
     const fitScale = Math.min(maxW / w, maxH / h);
     if (fitScale >= 1) {
