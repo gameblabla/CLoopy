@@ -4,11 +4,11 @@ This started as a C11-only port of LoopyMSE.
 It's got a few improvements :
 - Can run on the web
 - Limited printing support
-- Attempting to be more CPU accurate and follow the documented behavior more closely by using MAME's SH-1 + a few improvements on top of it
+- Attempting to be more CPU accurate and follow the documented behavior more closely by using MAME's SH-1 
 - A few VDP fixes (there may be a few regressions), including emulation for the Controller bit. (that was one big annoyance i had encountered initially)
 
 The main reason why i even made this, is because i kept encountering annoying crashes and issues on real hardware in regards to homebrew software.
-I have since discovered... interesting issues, like the EXTS.W extension sign bug in Mame's core.
+
 To be more accurate, this would need more intensive CPU tests + ROM/RAM wait states etc.. Right now, there is some but not really,
 the speed of emulator != speed of console, but with my limited testing, it diverges less from real console than LoopyMSE would.
 
