@@ -736,7 +736,6 @@ static void LDSMMACH(uint32_t m)
 	sh7021.ea = sh7021.gpr[m];
 	sh7021.mach = sh7021_mach_sh1_canonical(sh7021_bus_read32(sh7021.ea));
 	sh7021.gpr[m] += 4;
-	sh7021.cycles_left -= 2;
 	sh7021_block_irq_next();
 }
 
@@ -746,7 +745,6 @@ static void LDSMMACL(uint32_t m)
 	sh7021.ea = sh7021.gpr[m];
 	sh7021.macl = sh7021_bus_read32(sh7021.ea);
 	sh7021.gpr[m] += 4;
-	sh7021.cycles_left -= 2;
 	sh7021_block_irq_next();
 }
 
@@ -756,7 +754,6 @@ static void LDSMPR(uint32_t m)
 	sh7021.ea = sh7021.gpr[m];
 	sh7021.pr = sh7021_bus_read32(sh7021.ea);
 	sh7021.gpr[m] += 4;
-	sh7021.cycles_left -= 2;
 	sh7021_block_irq_next();
 }
 
@@ -1406,7 +1403,6 @@ static void STSMMACH(uint32_t n)
 	sh7021.gpr[n] -= 4;
 	sh7021.ea = sh7021.gpr[n];
 	sh7021_bus_write32(sh7021.ea, sh7021_mach_sh1_read());
-	sh7021.cycles_left--;
 	sh7021_block_irq_next();
 }
 
@@ -1416,7 +1412,6 @@ static void STSMMACL(uint32_t n)
 	sh7021.gpr[n] -= 4;
 	sh7021.ea = sh7021.gpr[n];
 	sh7021_bus_write32(sh7021.ea, sh7021.macl);
-	sh7021.cycles_left--;
 	sh7021_block_irq_next();
 }
 
@@ -1426,7 +1421,6 @@ static void STSMPR(uint32_t n)
 	sh7021.gpr[n] -= 4;
 	sh7021.ea = sh7021.gpr[n];
 	sh7021_bus_write32(sh7021.ea, sh7021.pr);
-	sh7021.cycles_left--;
 	sh7021_block_irq_next();
 }
 
