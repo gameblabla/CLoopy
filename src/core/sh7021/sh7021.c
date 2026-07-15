@@ -7,6 +7,7 @@
 #include "core/sh7021/peripherals/sh7021_intc.h"
 #include "core/sh7021/peripherals/sh7021_serial.h"
 #include "core/sh7021/peripherals/sh7021_timers.h"
+#include "core/loopy_debug.h"
 #include "core/memory.h"
 #include "core/loopy_io.h"
 #include "core/timing.h"
@@ -527,6 +528,11 @@ void sh7021_run(void) {
         }
 
         sh7021_bios_print_hook(fetch_pc);
+        /* Sampled before the fetch so the instruction is charged for its own
+           operand wait states, which the bus model subtracts from cycles_left
+           as the instruction runs.  Those stalls are most of what makes one PC
+           slower than another, so attributing them here is the whole point. */
+        int32_t cycles_at_fetch = sh7021.cycles_left;
         uint16_t instr = sh7021_bus_fetch16(fetch_pc);
         sh7021.current_opcode_pc = fetch_pc;
         sh7021.in_delay_slot = 0;
@@ -553,9 +559,15 @@ void sh7021_run(void) {
                 sh7021_raise_slot_illegal();
             } else {
                 sh7021.pc = target_pc;
+                loopy_debug_note_transfer(fetch_pc, target_pc, instr);
                 sh7021_bus_fetch_reset();
             }
         }
+
+        /* Charged after the delay slot, so a branch and its slot bill as one
+           unit of control flow.  Splitting them would attribute the slot's cost
+           to an address that is never independently reachable. */
+        loopy_debug_cpu_post(fetch_pc, (int)(cycles_at_fetch - sh7021.cycles_left));
     }
 }
 

@@ -69,6 +69,13 @@ int video_get_display_active_height(void);
 int video_get_display_active_y_offset(void);
 
 void video_dump_for_serial();
+/* Side-effect-free read of VDP memory for inspection, taking a translated
+   (0x04xxxxxx) address.  Unlike video_bus_read*, this leaves the bus latch
+   alone, so dumping VRAM cannot change what a subsequent open-bus read
+   returns.  Backed memory only: VRAM, OAM, palette and the capture buffer.
+   Returns nonzero and stores the big-endian value when addr is in range. */
+int video_debug_peek(uint32_t addr, int bytes, uint32_t *out_value);
+
 uint32_t video_state_blob_size(void);
 void video_get_state_blob(void *dst, uint32_t size);
 void video_set_state_blob(const void *src, uint32_t size);

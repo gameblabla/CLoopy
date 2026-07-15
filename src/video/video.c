@@ -1638,3 +1638,34 @@ void video_set_state_blob(const void *src, uint32_t size) {
     vdp.dma_mask = b->dma_mask;
     vdp.dma_value = b->dma_value;
 }
+
+int video_debug_peek(uint32_t addr, int bytes, uint32_t *out_value)
+{
+    const uint8_t *base;
+    uint32_t mask, offs;
+
+    if (!out_value || bytes < 1 || bytes > 4) return 0;
+
+    if (addr >= VIDEO_BITMAP_VRAM_START && addr < (uint32_t)(VIDEO_BITMAP_VRAM_END)) {
+        base = vdp.bitmap; mask = 0x1FFFFu; offs = addr - VIDEO_BITMAP_VRAM_START;
+    } else if (addr >= VIDEO_TILE_VRAM_START && addr < (uint32_t)(VIDEO_TILE_VRAM_END)) {
+        base = vdp.tile; mask = 0xFFFFu; offs = addr - VIDEO_TILE_VRAM_START;
+    } else if (addr >= VIDEO_OAM_START && addr < (uint32_t)(VIDEO_OAM_END)) {
+        base = vdp.oam; mask = 0x1FFu; offs = addr - VIDEO_OAM_START;
+    } else if (addr >= VIDEO_PALETTE_START && addr < (uint32_t)(VIDEO_PALETTE_END)) {
+        base = vdp.palette; mask = 0x1FFu; offs = addr - VIDEO_PALETTE_START;
+    } else if (addr >= VIDEO_CAPTURE_START && addr < (uint32_t)(VIDEO_CAPTURE_END)) {
+        base = vdp.capture_buffer; mask = 0x1FFu; offs = addr - VIDEO_CAPTURE_START;
+    } else {
+        /* Registers are deliberately excluded.  Several are strobes or clear
+           status on access, and reads of the control block are what the idle
+           detector keys on, so there is no way to sample them for inspection
+           without changing what the machine would do next. */
+        return 0;
+    }
+
+    uint32_t value = 0;
+    for (int i = 0; i < bytes; i++) value = (value << 8) | base[(offs + (uint32_t)i) & mask];
+    *out_value = value;
+    return 1;
+}

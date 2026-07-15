@@ -1,3 +1,4 @@
+#include "core/loopy_debug.h"
 #include "core/system.h"
 #include "core/cart.h"
 #include "core/loopy_io.h"
@@ -46,6 +47,7 @@ void system_run(void) {
         for (int i = 0; i < TIMING_NUM_TIMERS; i++) timing_process_slice(i, (int32_t)slice_length);
     }
     cart_sram_commit_check();
+    loopy_debug_note_frame();
 }
 
 uint16_t *system_get_display_output(void) { return video_get_display_output(); }

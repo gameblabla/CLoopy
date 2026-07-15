@@ -44,8 +44,12 @@ endif
 
 CSTD = -std=c11
 ALL_SRC := $(shell find src -name '*.c' | sort)
-CORE_SRC := $(filter-out src/main.c src/sdl3/main_sdl3.c src/libretro/libretro.c,$(ALL_SRC))
-HEADLESS_SRC := src/main.c
+# The MCP server is a headless-only frontend concern: SDL3 and libretro have no
+# stdio transport to serve it on, so it is kept out of those link units rather
+# than compiled in as dead code.
+MCP_SRC := $(shell find src/mcp -name '*.c' | sort)
+CORE_SRC := $(filter-out src/main.c src/sdl3/main_sdl3.c src/libretro/libretro.c $(MCP_SRC),$(ALL_SRC))
+HEADLESS_SRC := src/main.c $(MCP_SRC)
 SDL3_SRC := src/sdl3/main_sdl3.c
 LIBRETRO_SRC := src/libretro/libretro.c
 HEADLESS_OBJ := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(CORE_SRC) $(HEADLESS_SRC))
@@ -53,18 +57,21 @@ SDL3_OBJ := $(patsubst src/%.c,$(BUILD_DIR)/%.sdl3.o,$(CORE_SRC) $(SDL3_SRC))
 LIBRETRO_OBJ := $(patsubst src/%.c,$(BUILD_DIR)/%.lr.o,$(CORE_SRC) $(LIBRETRO_SRC))
 DEP := $(HEADLESS_OBJ:.o=.d) $(SDL3_OBJ:.o=.d) $(LIBRETRO_OBJ:.o=.d)
 
-.PHONY: all headless sdl3 sdl3-check libretro wanwan-oki-rom test test-cpu test-bsc test-io test-mouse test-printer test-cmdlist clean run-smoke run-smoke-debug
+.PHONY: all headless sdl3 sdl3-check libretro wanwan-oki-rom test test-cpu test-disasm test-bsc test-io test-mouse test-printer test-cmdlist clean run-smoke run-smoke-debug
 all: $(WANWAN_OKI_ROM_PREREQ) headless
 headless: $(WANWAN_OKI_ROM_PREREQ) $(TARGET_HEADLESS)
 sdl3: $(WANWAN_OKI_ROM_PREREQ) $(TARGET_SDL3)
 sdl3-check: $(WANWAN_OKI_ROM_PREREQ) $(SDL3_OBJ)
 libretro: $(WANWAN_OKI_ROM_PREREQ) $(TARGET_LIBRETRO)
 
-test: test-cpu test-bsc test-io test-mouse test-printer test-cmdlist
+test: test-cpu test-disasm test-bsc test-io test-mouse test-printer test-cmdlist
 
 
 test-cpu: $(BUILD_DIR)/tests/sh7021_sign_extension_test
 	./$(BUILD_DIR)/tests/sh7021_sign_extension_test
+
+test-disasm: $(BUILD_DIR)/tests/sh7021_disasm_test
+	./$(BUILD_DIR)/tests/sh7021_disasm_test
 
 test-bsc: $(BUILD_DIR)/tests/sh7021_bsc_test
 	./$(BUILD_DIR)/tests/sh7021_bsc_test
@@ -85,6 +92,10 @@ test-cmdlist: $(BUILD_DIR)/tests/cmdlist_roundtrip_test
 $(BUILD_DIR)/tests/sh7021_sign_extension_test: tests/sh7021_sign_extension_test.c src/core/sh7021/sh7021_interpreter.c src/core/sh7021/sh7021_interpreter.h src/core/sh7021/sh7021_local.h src/core/sh7021/sh7021_bus.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/sh7021_sign_extension_test.c src/core/sh7021/sh7021_interpreter.c -o $@
+
+$(BUILD_DIR)/tests/sh7021_disasm_test: tests/sh7021_disasm_test.c src/core/sh7021/sh7021_disasm.c src/core/sh7021/sh7021_disasm.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/sh7021_disasm_test.c src/core/sh7021/sh7021_disasm.c -o $@
 
 $(BUILD_DIR)/tests/sh7021_bsc_test: tests/sh7021_bsc_test.c src/core/sh7021/peripherals/sh7021_bsc.c src/core/sh7021/peripherals/sh7021_bsc.h
 	@mkdir -p $(dir $@)
@@ -125,6 +136,9 @@ $(BUILD_DIR)/tests/printer_png_test: tests/printer_png_test.c src/core/loopy_io.
 $(BUILD_DIR)/tests/cmdlist_roundtrip_test: tests/cmdlist_roundtrip_test.c src/frontend/cmdlist.c src/frontend/cmdlist.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/cmdlist_roundtrip_test.c src/frontend/cmdlist.c -o $@
+
+# fdopen/fileno/dup are POSIX; -std=c11 hides them behind __STRICT_ANSI__.
+$(BUILD_DIR)/mcp/%.o: CPPFLAGS += -D_POSIX_C_SOURCE=200809L
 
 $(BUILD_DIR)/%.o: src/%.c
 	@mkdir -p $(dir $@)

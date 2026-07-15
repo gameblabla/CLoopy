@@ -1,5 +1,8 @@
 #include "core/system.h"
 #include "core/sh7021/sh7021_bus.h"
+#include "core/sh7021/sh7021_disasm.h"
+#include "core/loopy_debug.h"
+#include "mcp/mcp_server.h"
 #include "frontend/loader.h"
 #include "frontend/cmdlist.h"
 #include "input/input.h"
@@ -326,10 +329,96 @@ static int run_cmdlist_print_extract(const LoopyLaunchInfo *launch) {
     return 0;
 }
 
+static void print_regions(void) {
+    printf("%-12s %-9s %-9s %4s  %s\n", "NAME", "START", "END", "BUS", "DESCRIPTION");
+    for (int i = 0; i < loopy_debug_region_count(); i++) {
+        const LoopyMemRegion *r = loopy_debug_region_at(i);
+        printf("%-12s %08X  %08X  %4d  %s\n", r->name, r->start, r->end, r->bus_bits, r->desc);
+    }
+}
+
+static void print_bus_prof(const char *tag) {
+    SH7021BusProf p;
+    sh7021_bus_prof_snapshot(&p);
+    printf("%s %-15s %10s %10s %10s %12s %12s\n", tag, "REGION", "READS", "WRITES", "FETCHES", "BYTES", "WAIT_CYC");
+    long long total_bytes = 0, total_wait = 0;
+    for (int r = 0; r < SH7021_BUS_REGION_COUNT; r++) {
+        const SH7021BusRegionCounters *c = &p.region[r];
+        if (!c->reads && !c->writes && !c->fetches) continue;
+        printf("%s %-15s %10lld %10lld %10lld %12lld %12lld\n", tag,
+               sh7021_bus_region_name((SH7021BusRegion)r),
+               c->reads, c->writes, c->fetches, c->bytes, c->wait_cycles);
+        total_bytes += c->bytes;
+        total_wait += c->wait_cycles;
+    }
+    printf("%s %-15s %10s %10s %10s %12lld %12lld\n", tag, "TOTAL", "", "", "", total_bytes, total_wait);
+    printf("%s dram_refresh_stalls=%lld dma_accesses=%lld dma_single=%lld dma_model_cycles=%lld\n",
+           tag, p.dram_refresh_stalls, p.dma_accesses, p.dma_single_accesses, p.dma_model_cycles);
+}
+
+static void print_cpu_prof(int top) {
+    uint64_t total = loopy_debug_cpu_total_cycles();
+    printf("CPU_PROF instructions=%llu cycles=%llu\n",
+           (unsigned long long)loopy_debug_cpu_total_instructions(),
+           (unsigned long long)total);
+    if (!total) return;
+
+    LoopyPcSample *s = (LoopyPcSample *)calloc((size_t)top, sizeof(LoopyPcSample));
+    if (!s) return;
+    int n = loopy_debug_cpu_hot_pcs(s, top);
+    printf("CPU_PROF %-10s %-14s %10s %12s %7s  %s\n", "PC", "REGION", "EXECS", "CYCLES", "SHARE", "INSTRUCTION");
+    for (int i = 0; i < n; i++) {
+        uint32_t opcode = 0;
+        char text[72] = "?";
+        if (sh7021_bus_peek(s[i].pc, 2, &opcode)) {
+            SH7021DisasmInsn insn;
+            sh7021_disasm_one(s[i].pc, (uint16_t)opcode, &insn, NULL, NULL);
+            snprintf(text, sizeof(text), "%s", insn.text);
+        }
+        printf("CPU_PROF %08X   %-14s %10llu %12llu %6.2f%%  %s\n",
+               s[i].pc, sh7021_bus_region_name(sh7021_bus_region_of(s[i].pc)),
+               (unsigned long long)s[i].executions, (unsigned long long)s[i].cycles,
+               100.0 * (double)s[i].cycles / (double)total, text);
+    }
+    free(s);
+}
+
+static void print_bios_trace(void) {
+    int n = loopy_debug_bios_call_count();
+    printf("BIOS_TRACE entries=%d\n", n);
+    if (!n) {
+        printf("BIOS_TRACE (no calls into BIOS ROM observed)\n");
+        return;
+    }
+    /* The hardware notes publish no BIOS entry table, so these addresses are
+       discovered, not looked up.  Only entries this emulator already hooks are
+       named; the rest are reported raw for identification. */
+    printf("BIOS_TRACE %-8s %10s %8s %8s %-10s %-18s %s\n",
+           "ENTRY", "TOTAL", "JSR/BSR", "JMP/BRA", "CALLER", "NAME", "ARGS R4-R7 (first call)");
+    for (int i = 0; i < n; i++) {
+        const LoopyBiosCallSite *c = loopy_debug_bios_call_at(i);
+        printf("BIOS_TRACE %08X %10llu %8llu %8llu %08X   %-18s %08X %08X %08X %08X\n",
+               c->entry, (unsigned long long)c->count,
+               (unsigned long long)c->via_call, (unsigned long long)c->via_jump,
+               c->first_caller, c->name ? c->name : "-",
+               c->first_args[0], c->first_args[1], c->first_args[2], c->first_args[3]);
+    }
+}
+
+static int run_disasm_spec(const char *spec) {
+    char *end = NULL;
+    uint32_t addr = (uint32_t)strtoul(spec, &end, 0);
+    int count = 32;
+    if (end && *end == ',') count = atoi(end + 1);
+    if (count < 1) count = 1;
+    return loopy_debug_disassemble(addr, count, stdout) > 0 ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
     LoopyLaunchInfo launch;
     if (loopy_parse_common_args(argc, argv, &launch, 4800) != 0) {
         printf("Args: <game ROM> <BIOS> [sound BIOS] [OKI ADPCM ROM] [--frames N] [--device gamepad|mouse] [--mouse|--gamepad] [--record-y4m file] [--record-wav file] [--load-state file] [--oki-rom file] [--no-wanwan-internal-pcm] [--wanwan-oki-montage-wav file] [--y4m-start N] [--y4m-step N] [--auto-cascadefx] [--cascadefx-watch] [--cascadefx-prof] [--cascadefx-dpad-test] [--cascadefx-dpad-prehold-test] [--cascadefx-dpad-tap-test] [--cascadefx-pad-trace] [--auto-anarch] [--anarch-prof] [--lr-hold-left] [--lr-hold-left-start N] [--lr-mouse-dx N] [--printer-output-dir dir] [--printer-trace]\n");
+        printf("Inspection: [--mcp] [--list-regions] [--disasm ADDR[,COUNT]] [--dump REGION FILE] [--bus-prof] [--bus-prof-per-frame] [--cpu-prof] [--cpu-prof-top N] [--bios-trace]\n");
         printf("Default: --frames 4800, which waits long enough for Little Romance and the other retail title screens under the MAME-derived SH7021 core.\n");
         return 1;
     }
@@ -342,10 +431,31 @@ int main(int argc, char **argv) {
         return run_cmdlist_print_extract(&launch);
     }
 
+    /* Claimed before anything loads, so loader/core banners cannot land in the
+       JSON-RPC stream. */
+    if (launch.mcp && loopy_mcp_claim_stdout() != 0) {
+        fprintf(stderr, "Could not claim stdout for the MCP transport\n");
+        return 1;
+    }
+
     ConfigSystemInfo config;
     if (loopy_load_config(&launch, &config) != 0) return 1;
 
     system_initialize(&config);
+
+    if (launch.list_regions) print_regions();
+    loopy_debug_bios_trace_set_enabled(launch.bios_trace);
+    loopy_debug_cpu_profile_set_enabled(launch.cpu_prof);
+
+    if (launch.mcp) {
+        /* stdout is the MCP transport from here on, so nothing else may print
+           to it.  The session is already booted; the client drives it. */
+        int rc = loopy_mcp_serve();
+        system_shutdown();
+        loopy_config_free(&config);
+        return rc;
+    }
+
     const char *load_state_path = launch.load_state_path;
     if (!load_state_path || !*load_state_path) load_state_path = getenv("LOOPY_LOAD_STATE");
     if (load_state_path && *load_state_path) {
@@ -383,18 +493,29 @@ int main(int argc, char **argv) {
                    i + 1, r0, v0, r1, v1, r2, v2);
         }
         if (launch.cascadefx_prof || launch.anarch_prof) {
-            long long vc, va, vb, rc, ra, cc, ca, ic, ia, dr, dmc, dma, dms;
-            sh7021_bus_prof_get(&vc, &va, &vb, &rc, &ra);
-            sh7021_bus_prof_get_cart(&cc, &ca);
-            sh7021_bus_prof_get_internal(&ic, &ia, &dr);
-            sh7021_bus_prof_get_dma(&dmc, &dma, &dms);
-            printf("BUS_PROF frame=%d vdp_accesses=%lld vdp_bytes=%lld vdp_wait=%lld ram_accesses=%lld ram_wait=%lld cart_accesses=%lld cart_wait=%lld internal_accesses=%lld internal_wait=%lld dram_refresh=%lld dma_accesses=%lld dma_single=%lld dma_model_cycles=%lld\n",
-                   i + 1, va, vb, vc, ra, rc, ca, cc, ia, ic, dr, dma, dms, dmc);
+            SH7021BusProf bp;
+            sh7021_bus_prof_snapshot(&bp);
+            printf("BUS_PROF frame=%d", i + 1);
+            for (int r = 0; r < SH7021_BUS_REGION_COUNT; r++) {
+                const SH7021BusRegionCounters *c = &bp.region[r];
+                if (!c->reads && !c->writes && !c->fetches) continue;
+                printf(" %s={r=%lld,w=%lld,f=%lld,bytes=%lld,wait=%lld}",
+                       sh7021_bus_region_name((SH7021BusRegion)r),
+                       c->reads, c->writes, c->fetches, c->bytes, c->wait_cycles);
+            }
+            printf(" dram_refresh=%lld dma_accesses=%lld dma_single=%lld dma_model_cycles=%lld\n",
+                   bp.dram_refresh_stalls, bp.dma_accesses, bp.dma_single_accesses, bp.dma_model_cycles);
             if (launch.anarch_prof) {
                 uint32_t anarch_ticks = sh7021_bus_read32(0x0900012Cu);
                 uint32_t anarch_state = sh7021_bus_read8(0x09000650u);
                 printf("ANARCH_WATCH frame=%d ticks=%u state=%u\n", i + 1, anarch_ticks, anarch_state);
             }
+            sh7021_bus_prof_reset();
+        }
+        if (launch.bus_prof_per_frame) {
+            char tag[32];
+            snprintf(tag, sizeof(tag), "BUS_PROF[%d]", i + 1);
+            print_bus_prof(tag);
             sh7021_bus_prof_reset();
         }
         int frame_no = i + 1;
@@ -404,6 +525,21 @@ int main(int argc, char **argv) {
     }
     y4m_close(&y4m);
     sound_wav_close();
+
+    /* Reports run after the frame loop but before shutdown, while the machine
+       is still live and peekable. */
+    if (launch.bus_prof && !launch.bus_prof_per_frame) print_bus_prof("BUS_PROF");
+    if (launch.cpu_prof) print_cpu_prof(launch.cpu_prof_top);
+    if (launch.bios_trace) print_bios_trace();
+    for (int d = 0; d < launch.dump_count; d++) {
+        const char *region = launch.dumps[d].region;
+        const char *path = launch.dumps[d].path;
+        uint32_t n = loopy_debug_dump_region(region, path);
+        if (!n) fprintf(stderr, "Dump failed for region '%s' -> %s\n", region, path);
+        else printf("DUMP region=%s bytes=%u path=%s\n", region, n, path);
+    }
+    if (launch.disasm_spec) run_disasm_spec(launch.disasm_spec);
+
     system_shutdown();
     loopy_config_free(&config);
     return 0;

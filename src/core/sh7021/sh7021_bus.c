@@ -10,59 +10,65 @@
 #include <stdio.h>
 #include <string.h>
 
-static long long prof_vdp_wait_cycles = 0;
-static long long prof_vdp_accesses = 0;
-static long long prof_vdp_bytes = 0;
-static long long prof_workram_wait_cycles = 0;
-static long long prof_workram_accesses = 0;
-static long long prof_cart_wait_cycles = 0;
-static long long prof_cart_accesses = 0;
-static long long prof_internal_wait_cycles = 0;
-static long long prof_internal_accesses = 0;
-static long long prof_dram_refresh_stalls = 0;
-static long long prof_dma_model_cycles = 0;
-static long long prof_dma_accesses = 0;
-static long long prof_dma_single_accesses = 0;
+/* Bus traffic is accounted per memory area, using the same division the Loopy
+   hardware notes use (see "Memory Areas"): the area is selected by the top byte
+   of the CPU address, and each area is a physically distinct target with its
+   own bus width and access time.  Splitting the counters this way means a
+   caller can attribute a frame's wait cycles to the chip that actually imposed
+   them rather than to a catch-all "internal"/"cart" bucket. */
+static SH7021BusProf prof;
+
+SH7021BusRegion sh7021_bus_region_of(uint32_t raw_addr) {
+    switch (raw_addr & 0x0F000000u) {
+    case 0x00000000u: return SH7021_BUS_REGION_BIOS_ROM;
+    case 0x02000000u: return SH7021_BUS_REGION_CART_SRAM;
+    case 0x04000000u: return SH7021_BUS_REGION_VDP_LOW_MIRROR;
+    case 0x05000000u: return SH7021_BUS_REGION_PERIPHERALS;
+    case 0x09000000u: return SH7021_BUS_REGION_WORK_RAM;
+    case 0x0C000000u: return SH7021_BUS_REGION_VDP;
+    case 0x0E000000u: return SH7021_BUS_REGION_CART_ROM;
+    case 0x0F000000u: return SH7021_BUS_REGION_OCRAM;
+    default: return SH7021_BUS_REGION_OPEN_BUS;
+    }
+}
+
+#define prof_classify sh7021_bus_region_of
+
+static void prof_note_access(uint32_t raw_addr, int bytes, int kind) {
+    SH7021BusRegionCounters *c = &prof.region[prof_classify(raw_addr)];
+    switch (kind) {
+    case 0: c->reads++; break;
+    case 1: c->writes++; break;
+    default: c->fetches++; break;
+    }
+    c->bytes += bytes;
+}
+
+static void prof_note_wait(uint32_t raw_addr, int cycles) {
+    if (cycles > 0) prof.region[prof_classify(raw_addr)].wait_cycles += cycles;
+}
 
 void sh7021_bus_prof_reset(void) {
-    prof_vdp_wait_cycles = 0;
-    prof_vdp_accesses = 0;
-    prof_vdp_bytes = 0;
-    prof_workram_wait_cycles = 0;
-    prof_workram_accesses = 0;
-    prof_cart_wait_cycles = 0;
-    prof_cart_accesses = 0;
-    prof_internal_wait_cycles = 0;
-    prof_internal_accesses = 0;
-    prof_dram_refresh_stalls = 0;
-    prof_dma_model_cycles = 0;
-    prof_dma_accesses = 0;
-    prof_dma_single_accesses = 0;
+    memset(&prof, 0, sizeof(prof));
 }
 
-void sh7021_bus_prof_get(long long *vdp_cycles, long long *vdp_accesses, long long *vdp_bytes, long long *ram_cycles, long long *ram_accesses) {
-    if (vdp_cycles) *vdp_cycles = prof_vdp_wait_cycles;
-    if (vdp_accesses) *vdp_accesses = prof_vdp_accesses;
-    if (vdp_bytes) *vdp_bytes = prof_vdp_bytes;
-    if (ram_cycles) *ram_cycles = prof_workram_wait_cycles;
-    if (ram_accesses) *ram_accesses = prof_workram_accesses;
+void sh7021_bus_prof_snapshot(SH7021BusProf *out) {
+    if (out) *out = prof;
 }
 
-void sh7021_bus_prof_get_cart(long long *cart_cycles, long long *cart_accesses) {
-    if (cart_cycles) *cart_cycles = prof_cart_wait_cycles;
-    if (cart_accesses) *cart_accesses = prof_cart_accesses;
-}
-
-void sh7021_bus_prof_get_internal(long long *internal_cycles, long long *internal_accesses, long long *dram_refresh_stalls) {
-    if (internal_cycles) *internal_cycles = prof_internal_wait_cycles;
-    if (internal_accesses) *internal_accesses = prof_internal_accesses;
-    if (dram_refresh_stalls) *dram_refresh_stalls = prof_dram_refresh_stalls;
-}
-
-void sh7021_bus_prof_get_dma(long long *dma_model_cycles, long long *dma_accesses, long long *dma_single_accesses) {
-    if (dma_model_cycles) *dma_model_cycles = prof_dma_model_cycles;
-    if (dma_accesses) *dma_accesses = prof_dma_accesses;
-    if (dma_single_accesses) *dma_single_accesses = prof_dma_single_accesses;
+const char *sh7021_bus_region_name(SH7021BusRegion region) {
+    switch (region) {
+    case SH7021_BUS_REGION_BIOS_ROM: return "bios_rom";
+    case SH7021_BUS_REGION_CART_SRAM: return "cart_sram";
+    case SH7021_BUS_REGION_VDP_LOW_MIRROR: return "vdp_low_mirror";
+    case SH7021_BUS_REGION_PERIPHERALS: return "peripherals";
+    case SH7021_BUS_REGION_WORK_RAM: return "work_ram";
+    case SH7021_BUS_REGION_VDP: return "vdp";
+    case SH7021_BUS_REGION_CART_ROM: return "cart_rom";
+    case SH7021_BUS_REGION_OCRAM: return "ocram";
+    case SH7021_BUS_REGION_OPEN_BUS: return "open_bus";
+    default: return "?";
+    }
 }
 
 static uint32_t translate_addr(uint32_t addr) {
@@ -89,10 +95,8 @@ static void apply_vdp_wait(uint32_t raw_addr, uint32_t translated_addr, int byte
     int cycles = video_bus_wait_cycles(raw_addr, translated_addr, bytes, write != 0);
     if (cycles > 0) {
         sh7021.cycles_left -= cycles;
-        prof_vdp_wait_cycles += cycles;
+        prof_note_wait(raw_addr, cycles);
     }
-    prof_vdp_accesses++;
-    prof_vdp_bytes += bytes;
 }
 
 static void apply_workram_wait(uint32_t raw_addr, int bytes) {
@@ -121,14 +125,13 @@ static void apply_workram_wait(uint32_t raw_addr, int bytes) {
     if (cycles > 0) {
         int64_t after = now + cycles;
         while (next_dram_refresh_cycle <= after) {
-            prof_dram_refresh_stalls++;
+            prof.dram_refresh_stalls++;
             next_dram_refresh_cycle += 244;
         }
     }
 
     sh7021.cycles_left -= cycles;
-    prof_workram_wait_cycles += cycles;
-    prof_workram_accesses++;
+    prof_note_wait(raw_addr, cycles);
 }
 
 
@@ -142,8 +145,7 @@ static void apply_internal_peripheral_wait(uint32_t raw_addr, int bytes) {
     int total_cycles = transfers * 3;
     int cycles = extra_cycles_for_transfers(total_cycles, transfers);
     sh7021.cycles_left -= cycles;
-    prof_internal_wait_cycles += cycles;
-    prof_internal_accesses++;
+    prof_note_wait(raw_addr, cycles);
 }
 
 static void apply_vdp_mmio_wait(uint32_t raw_addr, uint32_t translated_addr, int bytes, int write) {
@@ -156,9 +158,7 @@ static void apply_vdp_mmio_wait(uint32_t raw_addr, uint32_t translated_addr, int
     int cycles = extra_cycles_for_transfers(total_cycles, transfers);
     if (area == VIDEO_VDP_AREA_LOW_MIRROR) cycles += bytes;
     sh7021.cycles_left -= cycles;
-    prof_vdp_wait_cycles += cycles;
-    prof_vdp_accesses++;
-    prof_vdp_bytes += bytes;
+    prof_note_wait(raw_addr, cycles);
 }
 
 static int transfer_count_for_width(int bytes, int bus_width_bytes) {
@@ -185,8 +185,7 @@ static void apply_cart_wait(uint32_t raw_addr, int bytes, int write) {
     int cycles = extra_cycles_for_transfers(total_cycles, transfers);
     if (cycles > 0) {
         sh7021.cycles_left -= cycles;
-        prof_cart_wait_cycles += cycles;
-        prof_cart_accesses++;
+        prof_note_wait(raw_addr, cycles);
     }
 }
 
@@ -267,6 +266,7 @@ uint16_t sh7021_bus_fetch16(uint32_t addr) {
     int sequential = last_opcode_fetch_valid && raw_addr == (last_opcode_fetch_addr + 2u);
     uint8_t *mem = sh7021.pagetable[translated >> 12];
     if (mem) {
+        prof_note_access(raw_addr, 2, 2);
         apply_workram_wait(raw_addr, 2);
         if (!sequential) apply_cart_wait(raw_addr, 2, 0);
         uint16_t value; memcpy(&value, mem + (translated & 0xFFFu), 2);
@@ -281,6 +281,7 @@ uint16_t sh7021_bus_fetch16(uint32_t addr) {
 
 uint8_t sh7021_bus_read8(uint32_t addr) {
     uint32_t raw_addr = addr;
+    prof_note_access(raw_addr, 1, 0);
     addr = translate_addr(addr);
     if (video_bus_is_vdp_addr(raw_addr, addr)) { idle_note_read(addr, 1); apply_vdp_wait(raw_addr, addr, 1, 0); return video_bus_read8(raw_addr); }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
@@ -292,6 +293,7 @@ uint8_t sh7021_bus_read8(uint32_t addr) {
 }
 uint16_t sh7021_bus_read16(uint32_t addr) {
     uint32_t raw_addr = addr;
+    prof_note_access(raw_addr, 2, 0);
     addr = translate_addr(addr);
     if (video_bus_is_vdp_addr(raw_addr, addr)) { idle_note_read(addr, 2); apply_vdp_wait(raw_addr, addr, 2, 0); return video_bus_read16(raw_addr); }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
@@ -303,6 +305,7 @@ uint16_t sh7021_bus_read16(uint32_t addr) {
 }
 uint32_t sh7021_bus_read32(uint32_t addr) {
     uint32_t raw_addr = addr;
+    prof_note_access(raw_addr, 4, 0);
     addr = translate_addr(addr);
     if (video_bus_is_vdp_addr(raw_addr, addr)) { idle_note_read(addr, 4); apply_vdp_wait(raw_addr, addr, 4, 0); return video_bus_read32(raw_addr); }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
@@ -315,6 +318,7 @@ uint32_t sh7021_bus_read32(uint32_t addr) {
 void sh7021_bus_write8(uint32_t addr, uint8_t value) {
     sh7021_idle_wrote_mem = 1;
     uint32_t raw_addr = addr;
+    prof_note_access(raw_addr, 1, 1);
     addr = translate_addr(addr);
     if (video_bus_is_vdp_addr(raw_addr, addr)) { apply_vdp_wait(raw_addr, addr, 1, 1); video_bus_write8(raw_addr, value); return; }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
@@ -326,6 +330,7 @@ void sh7021_bus_write8(uint32_t addr, uint8_t value) {
 void sh7021_bus_write16(uint32_t addr, uint16_t value) {
     sh7021_idle_wrote_mem = 1;
     uint32_t raw_addr = addr;
+    prof_note_access(raw_addr, 2, 1);
     addr = translate_addr(addr);
     if (video_bus_is_vdp_addr(raw_addr, addr)) { apply_vdp_wait(raw_addr, addr, 2, 1); video_bus_write16(raw_addr, value); return; }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
@@ -337,6 +342,7 @@ void sh7021_bus_write16(uint32_t addr, uint16_t value) {
 void sh7021_bus_write32(uint32_t addr, uint32_t value) {
     sh7021_idle_wrote_mem = 1;
     uint32_t raw_addr = addr;
+    prof_note_access(raw_addr, 4, 1);
     addr = translate_addr(addr);
     if (video_bus_is_vdp_addr(raw_addr, addr)) { apply_vdp_wait(raw_addr, addr, 4, 1); video_bus_write32(raw_addr, value); return; }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
@@ -347,11 +353,50 @@ void sh7021_bus_write32(uint32_t addr, uint32_t value) {
 }
 
 
+/* Inspection reads.  Every path here is a plain array load: no bus latch, no
+   wait-state charge, no idle-detector poisoning, no status flag cleared.  That
+   is the whole point - a debugger or MCP client can sample memory between
+   instructions without altering what the machine does next.  MMIO registers are
+   therefore not peekable at all, and report failure rather than a guess.
+
+   Resolved a byte at a time so a read spanning a 4KB page boundary, or running
+   off the end of a mapped region, is handled rather than walking off the page. */
+static int sh7021_bus_peek_byte(uint32_t addr, uint8_t *out) {
+    uint32_t translated = translate_addr(addr);
+    if (video_bus_is_vdp_addr(addr, translated)) {
+        uint32_t value;
+        if (!video_debug_peek(translated, 1, &value)) return 0;
+        *out = (uint8_t)value;
+        return 1;
+    }
+    if (translated >= SH7021_OCPM_ORAM_BASE_ADDR && translated < SH7021_OCPM_ORAM_END_ADDR) {
+        *out = sh7021_ocpm_oram_read8(translated);
+        return 1;
+    }
+    if (!sh7021.pagetable) return 0;
+    uint8_t *mem = sh7021.pagetable[translated >> 12];
+    if (!mem) return 0;
+    *out = mem[translated & 0xFFFu];
+    return 1;
+}
+
+int sh7021_bus_peek(uint32_t addr, int bytes, uint32_t *out_value) {
+    if (!out_value || bytes < 1 || bytes > 4) return 0;
+    uint32_t value = 0;
+    for (int i = 0; i < bytes; i++) {
+        uint8_t byte;
+        if (!sh7021_bus_peek_byte(addr + (uint32_t)i, &byte)) return 0;
+        value = (value << 8) | byte;
+    }
+    *out_value = value;
+    return 1;
+}
+
 static void note_dma_access(uint32_t addr, int bytes, int write, int single_address_mode) {
-    prof_dma_accesses++;
+    prof.dma_accesses++;
     if (single_address_mode) {
-        prof_dma_single_accesses++;
-        prof_dma_model_cycles += sh7021_bsc_dma_single_cycle_states(addr, bytes, write);
+        prof.dma_single_accesses++;
+        prof.dma_model_cycles += sh7021_bsc_dma_single_cycle_states(addr, bytes, write);
     }
 }
 

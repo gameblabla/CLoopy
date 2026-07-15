@@ -41,6 +41,22 @@ typedef struct LoopyLaunchInfo {
     int lr_mouse_dx;
     const char *printer_output_dir;
     int printer_trace;
+
+    /* Inspection / profiling.  See loopy_debug.h. */
+    int mcp;                     /* Serve MCP over stdio instead of running frames. */
+    int list_regions;
+    const char *disasm_spec;     /* "ADDR" or "ADDR,COUNT". */
+    /* --dump may be repeated, so one run can capture several regions from the
+       same machine state; dumping them from separate runs would not be
+       comparable. */
+#define LOOPY_MAX_DUMPS 16
+    struct { const char *region; const char *path; } dumps[LOOPY_MAX_DUMPS];
+    int dump_count;
+    int bus_prof;                /* Per-region memory traffic summary at exit. */
+    int bus_prof_per_frame;
+    int cpu_prof;                /* Hot-PC/bottleneck profile at exit. */
+    int cpu_prof_top;
+    int bios_trace;              /* Discover BIOS entry points by tracing. */
 } LoopyLaunchInfo;
 
 int loopy_parse_common_args(int argc, char **argv, LoopyLaunchInfo *out, int default_frames);

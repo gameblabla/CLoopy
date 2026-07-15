@@ -41,6 +41,7 @@ int loopy_parse_common_args(int argc, char **argv, LoopyLaunchInfo *out, int def
     out->y4m_step = 1;
     out->lr_hold_left_start = 1;
     out->lr_mouse_dx = -2;
+    out->cpu_prof_top = 20;
     if (argc >= 3 && strcmp(argv[1], "--replay-cmdlist") == 0) {
         out->replay_cmdlist_path = argv[2];
         int argi = 3;
@@ -70,7 +71,43 @@ int loopy_parse_common_args(int argc, char **argv, LoopyLaunchInfo *out, int def
     if (argi < argc && strncmp(argv[argi], "--", 2) != 0) out->sound_path = argv[argi++];
     if (argi < argc && strncmp(argv[argi], "--", 2) != 0) out->oki_adpcm_path = argv[argi++];
     while (argi < argc) {
-        if (strcmp(argv[argi], "--frames") == 0 && argi + 1 < argc) {
+        if (strcmp(argv[argi], "--mcp") == 0) {
+            out->mcp = 1;
+            argi++;
+        } else if (strcmp(argv[argi], "--list-regions") == 0) {
+            out->list_regions = 1;
+            argi++;
+        } else if (strcmp(argv[argi], "--disasm") == 0 && argi + 1 < argc) {
+            out->disasm_spec = argv[argi + 1];
+            argi += 2;
+        } else if (strcmp(argv[argi], "--dump") == 0 && argi + 2 < argc) {
+            if (out->dump_count >= LOOPY_MAX_DUMPS) {
+                fprintf(stderr, "Too many --dump requests (max %d)\n", LOOPY_MAX_DUMPS);
+                return -1;
+            }
+            out->dumps[out->dump_count].region = argv[argi + 1];
+            out->dumps[out->dump_count].path = argv[argi + 2];
+            out->dump_count++;
+            argi += 3;
+        } else if (strcmp(argv[argi], "--bus-prof") == 0) {
+            out->bus_prof = 1;
+            argi++;
+        } else if (strcmp(argv[argi], "--bus-prof-per-frame") == 0) {
+            out->bus_prof = 1;
+            out->bus_prof_per_frame = 1;
+            argi++;
+        } else if (strcmp(argv[argi], "--cpu-prof") == 0) {
+            out->cpu_prof = 1;
+            argi++;
+        } else if (strcmp(argv[argi], "--cpu-prof-top") == 0 && argi + 1 < argc) {
+            out->cpu_prof = 1;
+            out->cpu_prof_top = atoi(argv[argi + 1]);
+            if (out->cpu_prof_top < 1) out->cpu_prof_top = 20;
+            argi += 2;
+        } else if (strcmp(argv[argi], "--bios-trace") == 0) {
+            out->bios_trace = 1;
+            argi++;
+        } else if (strcmp(argv[argi], "--frames") == 0 && argi + 1 < argc) {
             out->frames = atoi(argv[argi + 1]);
             out->frames_set = 1;
             argi += 2;
