@@ -13,6 +13,7 @@ typedef struct LoopyLaunchInfo {
     const char *sound_path;
     const char *oki_adpcm_path;
     int wanwan_replacement_pcm_enabled;
+    int idle_skip_mode;    /* LoopyIdleSkipMode */
     int frames;
     int frames_set;
     int headless;

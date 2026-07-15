@@ -20,6 +20,8 @@ void system_initialize(const ConfigSystemInfo *config) {
     video_initialize();
     sound_initialize(&config->sound_rom, &config->oki_adpcm_rom, config->cart_is_wanwan, config->wanwan_replacement_pcm_enabled);
     sh7021_ocpm_serial_set_tx_callback(1, sound_midi_byte_in);
+    /* After sh7021_initialize(), which zeroes the core. */
+    sh7021_set_idle_skip(loopy_config_idle_skip_enabled(config));
 }
 
 void system_shutdown(void) {

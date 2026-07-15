@@ -24,6 +24,20 @@ static int ascii_ci_contains(const uint8_t *data, size_t size, const char *needl
     return 0;
 }
 
+int loopy_cart_rom_is_official(const uint8_t *rom, size_t size) {
+    if (!rom || size < 0x100u) return 0;
+
+    /* Retail cartridges carry a Casio copyright string in the header area ahead
+       of the exception vector table.  The offset is not fixed: Wanwan Aijou
+       Monogatari puts it at 0x20, Little Romance at 0x80, so scan the header
+       rather than testing one address.  Anything without it (homebrew, and
+       rebuilt images such as translation patches that drop the string) is
+       treated as unofficial, which is the conservative answer for every caller
+       here. */
+    size_t scan = size < 0x200u ? size : 0x200u;
+    return ascii_ci_contains(rom, scan, "CASIO");
+}
+
 int loopy_cart_rom_is_wanwan(const uint8_t *rom, size_t size) {
     if (!rom || size < 0x100u) return 0;
 

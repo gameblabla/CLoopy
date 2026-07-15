@@ -23,6 +23,13 @@ typedef struct SH7021CPU {
 
 extern SH7021CPU sh7021;
 
+/* Idle-loop detection state.  Deliberately kept out of SH7021CPU: the savestate
+   blob is a raw copy of that struct, and this is pure detection state that is
+   rebuilt from scratch every timeslice, so it must neither grow the blob nor be
+   restored from one.  sh7021_bus.c sets these; sh7021_run() consumes them. */
+extern uint8_t sh7021_idle_wrote_mem;
+extern uint8_t sh7021_idle_unsafe_read;
+
 void sh7021_assert_irq(int vector_id, int prio);
 void sh7021_irq_check(void);
 void sh7021_block_irq_next(void);

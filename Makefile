@@ -7,9 +7,23 @@ LDFLAGS ?=
 LDLIBS ?= -lm
 TARGET_HEADLESS ?= cloopy_headless
 TARGET_SDL3 ?= cloopy_sdl3
+TARGET_LIBRETRO ?= cloopy_libretro$(LIBRETRO_SUFFIX)
 BUILD_DIR ?= build
 SDL3_CFLAGS ?= $(shell pkg-config --cflags sdl3 2>/dev/null)
 SDL3_LIBS ?= $(shell pkg-config --libs sdl3 2>/dev/null) -lSDL3
+
+# libretro cores are shared libraries loaded by the frontend, so everything must
+# be position independent. NDEBUG matters: the emulator marks unimplemented
+# hardware with assert(), which would otherwise abort the whole frontend.
+LIBRETRO_OS := $(shell uname -s 2>/dev/null)
+ifeq ($(LIBRETRO_OS),Darwin)
+LIBRETRO_SUFFIX ?= .dylib
+LIBRETRO_LDFLAGS ?= -dynamiclib
+else
+LIBRETRO_SUFFIX ?= .so
+LIBRETRO_LDFLAGS ?= -shared -Wl,--version-script=src/libretro/link.T -Wl,--no-undefined
+endif
+LIBRETRO_CFLAGS ?= -fPIC -fvisibility=hidden -DNDEBUG
 PYTHON ?= python3
 WANWAN_SOUND_DIR ?= assets/wanwan_free_sounds
 WANWAN_OKI_ROM ?= wanwan_synthetic_msm6653a_457.bin
@@ -30,18 +44,21 @@ endif
 
 CSTD = -std=c11
 ALL_SRC := $(shell find src -name '*.c' | sort)
-CORE_SRC := $(filter-out src/main.c src/sdl3/main_sdl3.c,$(ALL_SRC))
+CORE_SRC := $(filter-out src/main.c src/sdl3/main_sdl3.c src/libretro/libretro.c,$(ALL_SRC))
 HEADLESS_SRC := src/main.c
 SDL3_SRC := src/sdl3/main_sdl3.c
+LIBRETRO_SRC := src/libretro/libretro.c
 HEADLESS_OBJ := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(CORE_SRC) $(HEADLESS_SRC))
 SDL3_OBJ := $(patsubst src/%.c,$(BUILD_DIR)/%.sdl3.o,$(CORE_SRC) $(SDL3_SRC))
-DEP := $(HEADLESS_OBJ:.o=.d) $(SDL3_OBJ:.o=.d)
+LIBRETRO_OBJ := $(patsubst src/%.c,$(BUILD_DIR)/%.lr.o,$(CORE_SRC) $(LIBRETRO_SRC))
+DEP := $(HEADLESS_OBJ:.o=.d) $(SDL3_OBJ:.o=.d) $(LIBRETRO_OBJ:.o=.d)
 
-.PHONY: all headless sdl3 sdl3-check wanwan-oki-rom test test-cpu test-bsc test-io test-mouse test-printer test-cmdlist clean run-smoke run-smoke-debug
+.PHONY: all headless sdl3 sdl3-check libretro wanwan-oki-rom test test-cpu test-bsc test-io test-mouse test-printer test-cmdlist clean run-smoke run-smoke-debug
 all: $(WANWAN_OKI_ROM_PREREQ) headless
 headless: $(WANWAN_OKI_ROM_PREREQ) $(TARGET_HEADLESS)
 sdl3: $(WANWAN_OKI_ROM_PREREQ) $(TARGET_SDL3)
 sdl3-check: $(WANWAN_OKI_ROM_PREREQ) $(SDL3_OBJ)
+libretro: $(WANWAN_OKI_ROM_PREREQ) $(TARGET_LIBRETRO)
 
 test: test-cpu test-bsc test-io test-mouse test-printer test-cmdlist
 
@@ -117,8 +134,15 @@ $(BUILD_DIR)/%.sdl3.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CSTD) $(CPPFLAGS) $(SDL3_CFLAGS) -DLOOPY_SDL3_FRONTEND $(CFLAGS) $(WARNFLAGS) -MMD -MP -c $< -o $@
 
+$(BUILD_DIR)/%.lr.o: src/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(CPPFLAGS) -Isrc/libretro -DLOOPY_LIBRETRO_FRONTEND $(LIBRETRO_CFLAGS) $(CFLAGS) $(WARNFLAGS) -MMD -MP -c $< -o $@
+
+$(TARGET_LIBRETRO): $(LIBRETRO_OBJ)
+	$(CC) $(LIBRETRO_LDFLAGS) $(LDFLAGS) -o $@ $(LIBRETRO_OBJ) $(LDLIBS)
+
 clean:
-	rm -rf $(BUILD_DIR) $(TARGET_HEADLESS) $(TARGET_SDL3) output_*.bmp emudump.bin $(WANWAN_OKI_ROM) $(WANWAN_OKI_ORDER)
+	rm -rf $(BUILD_DIR) $(TARGET_HEADLESS) $(TARGET_SDL3) $(TARGET_LIBRETRO) output_*.bmp emudump.bin $(WANWAN_OKI_ROM) $(WANWAN_OKI_ORDER)
 
 run-smoke: $(TARGET_HEADLESS)
 	./$(TARGET_HEADLESS) "Anime Land.bin" loopy_bios.bin sound.bin --frames 2400

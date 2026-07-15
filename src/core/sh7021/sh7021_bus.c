@@ -190,6 +190,38 @@ static void apply_cart_wait(uint32_t raw_addr, int bytes, int write) {
     }
 }
 
+/* Reads the idle-loop detector is allowed to consider repeatable.  Page-table
+   memory (RAM/ROM/SRAM) qualifies implicitly - it changes only when something
+   writes it, and a write is tracked separately.  Everything else is unsafe,
+   most importantly the on-chip peripherals, where the free-running timer
+   counters derive from the live timestamp and so do change mid-slice, and where
+   a read can clear a status flag.
+
+   Of the VDP control block only two words qualify:
+     0x000 display mode - changes only when written.
+     0x004 VCOUNT       - advanced only by the scanline event.
+   HCOUNT at 0x002 is deliberately excluded.  video_current_hcount() derives it
+   from timing_get_timestamp(), which inside a slice reads back as
+   timestamp + slice_length - cycles_left, so it advances as the slice is
+   consumed rather than only at events - it is a free-running counter in every
+   sense that matters here, and treating it as repeatable would let a loop
+   polling it be skipped past the values it was waiting to see.
+
+   Takes the translated address and the access width, so a byte read of a
+   neighbouring lane or a 32-bit read spanning HCOUNT is rejected too. */
+static inline int idle_read_is_repeatable(uint32_t translated_addr, int bytes) {
+    if (translated_addr < VIDEO_CTRL_REG_START || translated_addr >= VIDEO_CTRL_REG_END) return 0;
+    uint32_t off = translated_addr & 0xFFFu;
+    uint32_t end = off + (uint32_t)bytes;
+    if (off >= 0x004u && end <= 0x006u) return 1; /* VCOUNT word */
+    if (end <= 0x002u) return 1;                  /* display mode word */
+    return 0;
+}
+
+static inline void idle_note_read(uint32_t translated_addr, int bytes) {
+    if (!idle_read_is_repeatable(translated_addr, bytes)) sh7021_idle_unsafe_read = 1;
+}
+
 uint8_t unmapped_read8(uint32_t addr) { LOOPY_DEBUG_PRINTF("[SH7021] unmapped read8 %08X\n", addr); return 0; }
 uint16_t unmapped_read16(uint32_t addr) { LOOPY_DEBUG_PRINTF("[SH7021] unmapped read16 %08X\n", addr); return 0; }
 uint32_t unmapped_read32(uint32_t addr) { LOOPY_DEBUG_PRINTF("[SH7021] unmapped read32 %08X\n", addr); return 0; }
@@ -250,9 +282,10 @@ uint16_t sh7021_bus_fetch16(uint32_t addr) {
 uint8_t sh7021_bus_read8(uint32_t addr) {
     uint32_t raw_addr = addr;
     addr = translate_addr(addr);
-    if (video_bus_is_vdp_addr(raw_addr, addr)) { apply_vdp_wait(raw_addr, addr, 1, 0); return video_bus_read8(raw_addr); }
+    if (video_bus_is_vdp_addr(raw_addr, addr)) { idle_note_read(addr, 1); apply_vdp_wait(raw_addr, addr, 1, 0); return video_bus_read8(raw_addr); }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
     if (mem) { apply_workram_wait(raw_addr, 1); apply_cart_wait(raw_addr, 1, 0); return mem[addr & 0xFFFu]; }
+    idle_note_read(addr, 1);
     apply_vdp_mmio_wait(raw_addr, addr, 1, 0);
     apply_internal_peripheral_wait(raw_addr, 1);
     MMIO_ACCESS(read8, addr);
@@ -260,9 +293,10 @@ uint8_t sh7021_bus_read8(uint32_t addr) {
 uint16_t sh7021_bus_read16(uint32_t addr) {
     uint32_t raw_addr = addr;
     addr = translate_addr(addr);
-    if (video_bus_is_vdp_addr(raw_addr, addr)) { apply_vdp_wait(raw_addr, addr, 2, 0); return video_bus_read16(raw_addr); }
+    if (video_bus_is_vdp_addr(raw_addr, addr)) { idle_note_read(addr, 2); apply_vdp_wait(raw_addr, addr, 2, 0); return video_bus_read16(raw_addr); }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
     if (mem) { apply_workram_wait(raw_addr, 2); apply_cart_wait(raw_addr, 2, 0); uint16_t value; memcpy(&value, mem + (addr & 0xFFFu), 2); return common_bswp16(value); }
+    idle_note_read(addr, 2);
     apply_vdp_mmio_wait(raw_addr, addr, 2, 0);
     apply_internal_peripheral_wait(raw_addr, 2);
     MMIO_ACCESS(read16, addr);
@@ -270,14 +304,16 @@ uint16_t sh7021_bus_read16(uint32_t addr) {
 uint32_t sh7021_bus_read32(uint32_t addr) {
     uint32_t raw_addr = addr;
     addr = translate_addr(addr);
-    if (video_bus_is_vdp_addr(raw_addr, addr)) { apply_vdp_wait(raw_addr, addr, 4, 0); return video_bus_read32(raw_addr); }
+    if (video_bus_is_vdp_addr(raw_addr, addr)) { idle_note_read(addr, 4); apply_vdp_wait(raw_addr, addr, 4, 0); return video_bus_read32(raw_addr); }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
     if (mem) { apply_workram_wait(raw_addr, 4); apply_cart_wait(raw_addr, 4, 0); uint32_t value; memcpy(&value, mem + (addr & 0xFFFu), 4); return common_bswp32(value); }
+    idle_note_read(addr, 4);
     apply_vdp_mmio_wait(raw_addr, addr, 4, 0);
     apply_internal_peripheral_wait(raw_addr, 4);
     MMIO_ACCESS(read32, addr);
 }
 void sh7021_bus_write8(uint32_t addr, uint8_t value) {
+    sh7021_idle_wrote_mem = 1;
     uint32_t raw_addr = addr;
     addr = translate_addr(addr);
     if (video_bus_is_vdp_addr(raw_addr, addr)) { apply_vdp_wait(raw_addr, addr, 1, 1); video_bus_write8(raw_addr, value); return; }
@@ -288,6 +324,7 @@ void sh7021_bus_write8(uint32_t addr, uint8_t value) {
     MMIO_ACCESS(write8, addr, value);
 }
 void sh7021_bus_write16(uint32_t addr, uint16_t value) {
+    sh7021_idle_wrote_mem = 1;
     uint32_t raw_addr = addr;
     addr = translate_addr(addr);
     if (video_bus_is_vdp_addr(raw_addr, addr)) { apply_vdp_wait(raw_addr, addr, 2, 1); video_bus_write16(raw_addr, value); return; }
@@ -298,6 +335,7 @@ void sh7021_bus_write16(uint32_t addr, uint16_t value) {
     MMIO_ACCESS(write16, addr, value);
 }
 void sh7021_bus_write32(uint32_t addr, uint32_t value) {
+    sh7021_idle_wrote_mem = 1;
     uint32_t raw_addr = addr;
     addr = translate_addr(addr);
     if (video_bus_is_vdp_addr(raw_addr, addr)) { apply_vdp_wait(raw_addr, addr, 4, 1); video_bus_write32(raw_addr, value); return; }

@@ -3,6 +3,7 @@
 This started as a C11-only port of LoopyMSE.
 It's got a few improvements :
 - Can run on the web
+- libretro core, with savestates and rewind
 - Limited printing support
 - Attempting to be more CPU accurate and follow the documented behavior more closely by using MAME's SH-1 
 - A few VDP fixes (there may be a few regressions), including emulation for the Controller bit. (that was one big annoyance i had encountered initially)
@@ -14,11 +15,51 @@ the speed of emulator != speed of console, but with my limited testing, it diver
 
 And also LoopyMSE would spam that terminal like crazy lol.
 
+# libretro core
+
+```sh
+make libretro          # -> cloopy_libretro.so (.dylib on macOS)
+```
+
+Put `loopy_bios.bin` in the frontend's system directory. `loopy_soundbios.bin`
+(the sound BIOS) and `loopy_okirom.bin` (a real MSM6653A-457 dump for Wanwan)
+are optional and go in the same place. Battery saves go through the frontend as
+`.srm`; the core does not write `.sav` itself in this mode.
+
+Savestates use the same in-memory state blob as the native frontends, so the
+frontend's rewind works. `cloopy_libretro.info` is the core info file frontends
+read.
+
+## Idle Loop Skip
+
+Loopy titles spend most of their CPU time spinning in the BIOS vblank wait loop
+polling a VDP register. This option detects loops that provably cannot observe
+anything changing before the next scheduler event and fast-forwards the CPU
+through them, which is worth roughly 1.7-2x.
+
+It is bit-for-bit identical to running the spin for real: the detector only
+fires when a whole iteration wrote nothing, read nothing that can change on its
+own, and left every register identical, and it then consumes a whole number of
+iteration costs and lets the final iteration execute normally, so the slice ends
+on exactly the cycle it otherwise would. Verified by capturing every frame with
+the option on and off and comparing.
+
+It defaults to retail cartridges only, detected from the Casio copyright string
+in the cartridge header. Homebrew is what this emulator exists to test against
+real hardware, so unrecognised images opt out rather than in. Note that a
+rebuilt image which drops that string (a translation patch, for instance) reads
+as unrecognised even though the underlying game is retail. The native builds
+take `--idle-skip` / `--no-idle-skip` to force it either way, and the libretro
+core has the same three-way option.
+
 # License
 
 GPLv3+ except for MAME's SH1 core that is licensed differently.
 My changes to code in general fall under either license.
 LoopyMSE was licensed under the GPLv3+, this is derived from it (mostly the VDP core as well as the sound core).
+
+`src/libretro/libretro.h` is from libretro-common, MIT, Copyright (C) 2010-2023 The RetroArch team.
+The idle-loop skip is adapted from Gloopy (GPLv3, a LoopyMSE fork), reworked for this tree's SH-1 core.
 
 # TODO
 

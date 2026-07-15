@@ -105,6 +105,12 @@ int loopy_parse_common_args(int argc, char **argv, LoopyLaunchInfo *out, int def
                    strcmp(argv[argi], "--wanwan-replacement-pcm") == 0) {
             out->wanwan_replacement_pcm_enabled = 1;
             argi++;
+        } else if (strcmp(argv[argi], "--no-idle-skip") == 0) {
+            out->idle_skip_mode = LOOPY_IDLE_SKIP_OFF;
+            argi++;
+        } else if (strcmp(argv[argi], "--idle-skip") == 0) {
+            out->idle_skip_mode = LOOPY_IDLE_SKIP_ON;
+            argi++;
         } else if (strcmp(argv[argi], "--y4m-start") == 0 && argi + 1 < argc) {
             out->y4m_start = atoi(argv[argi + 1]);
             if (out->y4m_start < 1) out->y4m_start = 1;
@@ -237,7 +243,9 @@ int loopy_load_config(const LoopyLaunchInfo *launch, ConfigSystemInfo *config) {
     }
 
     config->cart_is_wanwan = loopy_cart_rom_is_wanwan(config->cart.rom.data, config->cart.rom.size);
+    config->cart_is_official = loopy_cart_rom_is_official(config->cart.rom.data, config->cart.rom.size);
     config->wanwan_replacement_pcm_enabled = launch->wanwan_replacement_pcm_enabled ? 1 : 0;
+    config->idle_skip_mode = launch->idle_skip_mode;
 
     uint32_t sram_start, sram_end;
     memcpy(&sram_start, config->cart.rom.data + 0x10, 4);

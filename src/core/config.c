@@ -75,3 +75,12 @@ char *loopy_strdup(const char *s) {
     memcpy(copy, s, n);
     return copy;
 }
+
+int loopy_config_idle_skip_enabled(const ConfigSystemInfo *config) {
+    if (!config) return 0;
+    switch (config->idle_skip_mode) {
+    case LOOPY_IDLE_SKIP_ON: return 1;
+    case LOOPY_IDLE_SKIP_OFF: return 0;
+    default: return config->cart_is_official ? 1 : 0;
+    }
+}

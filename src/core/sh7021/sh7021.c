@@ -403,12 +403,129 @@ void sh7021_initialize(void) {
 
 void sh7021_shutdown(void) { }
 
+uint8_t sh7021_idle_wrote_mem = 0;
+uint8_t sh7021_idle_unsafe_read = 0;
+
+static int idle_skip_enabled = 0;
+
+void sh7021_set_idle_skip(int enable) { idle_skip_enabled = enable ? 1 : 0; }
+int sh7021_get_idle_skip(void) { return idle_skip_enabled; }
+
+/* Everything architecturally visible to a loop body.  Equality across an
+   iteration is what proves the iteration was a no-op. */
+#define IDLE_SNAPSHOT_WORDS 22
+
+static void idle_take_snapshot(uint32_t *snap) {
+    memcpy(snap, sh7021.gpr, sizeof(sh7021.gpr));
+    snap[16] = sh7021.pr;
+    snap[17] = sh7021.macl;
+    snap[18] = sh7021.mach;
+    snap[19] = sh7021.gbr;
+    snap[20] = sh7021.vbr;
+    snap[21] = sh7021.sr;
+}
+
+static int idle_snapshot_matches(const uint32_t *snap) {
+    return !memcmp(snap, sh7021.gpr, sizeof(sh7021.gpr)) && snap[16] == sh7021.pr && snap[17] == sh7021.macl &&
+           snap[18] == sh7021.mach && snap[19] == sh7021.gbr && snap[20] == sh7021.vbr && snap[21] == sh7021.sr;
+}
+
+/* Only loops this short are considered.  The known wait loops span a handful of
+   bytes; the bound keeps the detector off the back edge of ordinary long loops. */
+#define IDLE_MAX_SPAN 64u
+
 void sh7021_run(void) {
+    /* The detector is rebuilt every timeslice.  This is what makes the skip
+       safe: a fixpoint may only be established from iterations executed within
+       the current slice, i.e. after the events that ended the previous one have
+       been applied.  Carrying detection state across a slice boundary would let
+       the CPU skip past a change it had not yet observed. */
+    uint32_t idle_prev_addr = 0xFFFFFFFFu;
+    uint32_t idle_head = 0;
+    uint32_t idle_snapshot[IDLE_SNAPSHOT_WORDS];
+    int32_t idle_cycles_at_head = 0;
+    int idle_armed = 0;
+    int idle_snapshot_valid = 0;
+    sh7021_idle_wrote_mem = 0;
+    sh7021_idle_unsafe_read = 0;
+
     while (sh7021.cycles_left > 0) {
         if (sh7021_service_pending_irq()) {
             continue;
         }
         uint32_t fetch_pc = sh7021.pc;
+
+        /* Evaluated at an instruction boundary before any state for this
+           iteration is touched, so bailing out here leaves the CPU parked
+           cleanly at the loop head.  irq_delay must be clear: inside a
+           deferral window an interrupt is owed but has not been taken, and
+           consuming the slice would push it past the point it was due. */
+        if (idle_skip_enabled) {
+            uint32_t addr = fetch_pc;
+            if (addr < idle_prev_addr && (idle_prev_addr - addr) <= IDLE_MAX_SPAN && !sh7021.in_delay_slot &&
+                !sh7021.irq_delay) {
+                int had_side_effects = sh7021_idle_wrote_mem || sh7021_idle_unsafe_read;
+
+                if (idle_armed && addr == idle_head) {
+                    if (had_side_effects) {
+                        /* The iteration just executed changed something outside
+                           the loop, so no fixpoint can span it.  Dropping the
+                           snapshot rather than refreshing it keeps tight write
+                           loops (memset, blits) free of snapshot cost and stops
+                           a stale snapshot being compared across an iteration
+                           that had side effects. */
+                        idle_snapshot_valid = 0;
+                    } else if (idle_snapshot_valid && idle_snapshot_matches(idle_snapshot)) {
+                        /* A full iteration wrote nothing, read nothing that can
+                           change on its own, and left every register identical:
+                           it will do so forever, and every future iteration
+                           costs exactly what this one just did.
+
+                           Fast-forward whole iterations only, then let the loop
+                           run on normally.  Zeroing cycles_left instead would
+                           end the slice a few cycles early: the wait-state model
+                           drives cycles_left negative, so a real spin overruns
+                           the slice by however much its final iteration
+                           overshot, and timing.c bills the slice as
+                           slice_length - cycles_left.  Consuming a whole
+                           multiple of the iteration cost and executing the
+                           remainder for real reproduces that overshoot exactly,
+                           which keeps the skip bit-for-bit identical rather than
+                           merely close. */
+                        int32_t per_iter = idle_cycles_at_head - sh7021.cycles_left;
+                        if (per_iter > 0) {
+                            /* Leave the last iteration to execute for real.
+                               cycles_left is only tested at the top of the loop
+                               below, and this runs mid-iteration, so the head
+                               instruction is executed no matter what is left
+                               here.  Fast-forwarding to exactly zero would
+                               therefore run one instruction too many and park
+                               the CPU past the loop head.  Stopping one
+                               iteration short keeps cycles_left >= 1, so the
+                               real spin's final iteration decides where the
+                               slice ends and by how much it overshoots. */
+                            int32_t n = (sh7021.cycles_left - 1) / per_iter;
+                            if (n > 0) sh7021.cycles_left -= n * per_iter;
+                        }
+                    } else {
+                        idle_snapshot_valid = 1;
+                        idle_take_snapshot(idle_snapshot);
+                    }
+                } else {
+                    idle_head = addr;
+                    idle_armed = 1;
+                    idle_snapshot_valid = 1;
+                    idle_take_snapshot(idle_snapshot);
+                }
+
+                sh7021_idle_wrote_mem = 0;
+                sh7021_idle_unsafe_read = 0;
+                idle_cycles_at_head = sh7021.cycles_left;
+            }
+
+            idle_prev_addr = addr;
+        }
+
         sh7021_bios_print_hook(fetch_pc);
         uint16_t instr = sh7021_bus_fetch16(fetch_pc);
         sh7021.current_opcode_pc = fetch_pc;

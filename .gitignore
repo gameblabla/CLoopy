@@ -4,6 +4,9 @@ build-wasm/
 *.elf
 cloopy_headless
 cloopy_sdl3
+cloopy_libretro.so
+cloopy_libretro.dylib
+cloopy_libretro.dll
 web/loopy_wasm_core.wasm
 build/
 *.bin
