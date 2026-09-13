@@ -467,6 +467,10 @@ static uint32_t video_tile_vram_read32(uint32_t addr)
 
 static void video_tile_vram_write8(uint32_t addr, uint8_t value)
 {
+    /* Tile VRAM is 16-bit SRAM (2x HM62256); 8-bit accesses only land on the
+       low (odd) byte lane. Even-byte writes are ignored, leaving 0x00, which
+       is what real hardware shows as blue/black vertical stripes. */
+    if (!(addr & 1u)) return;
     vdp.tile[(addr - VIDEO_TILE_VRAM_START) & 0xFFFFu] = value;
 }
 
