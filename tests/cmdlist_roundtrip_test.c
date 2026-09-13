@@ -11,7 +11,7 @@ int main(void) {
     for (uint32_t i = 0; i < LOOPY_CMDLIST_WIDTH * LOOPY_CMDLIST_HEIGHT; i++) pixels[i] = (uint16_t)(i & 0x7FFFu);
     for (size_t i = 0; i < sizeof(state); i++) state[i] = (unsigned char)(0xA0u + i);
     if (loopy_cmdlist_writer_open(&writer, path, LOOPY_CMDLIST_WIDTH, LOOPY_CMDLIST_HEIGHT) != 0) return 1;
-    if (loopy_cmdlist_writer_write_frame(&writer, 123u, state, (uint32_t)sizeof(state), pixels) != 0) return 2;
+    if (loopy_cmdlist_writer_write_frame(&writer, 123u, state, (uint32_t)sizeof(state), pixels, LOOPY_CMDLIST_WIDTH, LOOPY_CMDLIST_HEIGHT) != 0) return 2;
     if (loopy_cmdlist_writer_close(&writer) != 0) return 3;
 
     LoopyCmdListReader reader;
