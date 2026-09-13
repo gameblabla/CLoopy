@@ -440,7 +440,7 @@ static void draw_overlay(App *app) {
 #define MENU_PANEL_X 32.0f
 #define MENU_PANEL_Y 32.0f
 #define MENU_PANEL_W 460.0f
-#define MENU_PANEL_H 452.0f
+#define MENU_PANEL_H 484.0f
 #define MENU_TOAST_X 516.0f
 #define MENU_TOAST_Y 42.0f
 #define MENU_TOAST_W 316.0f
