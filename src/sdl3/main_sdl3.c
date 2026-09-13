@@ -15,8 +15,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define BASE_W VIDEO_DISPLAY_WIDTH
-#define BASE_H VIDEO_DISPLAY_HEIGHT
+#define BASE_W VIDEO_PRESENT_WIDTH
+#define BASE_H VIDEO_PRESENT_HEIGHT
 #define MAX_CONTROLLERS 4
 #define OVERLAY_MS 1500u
 
@@ -81,6 +81,8 @@ typedef struct ReplayApp {
     bool fullscreen;
     bool vdp_replay_initialized;
     bool rendered_from_state;
+    uint32_t stored_fw;
+    uint32_t stored_fh;
     uint64_t last_advance;
     char message[160];
     uint64_t overlay_until;
@@ -299,16 +301,22 @@ static void close_sdl(App *app) {
 static SDL_FRect calc_viewport(App *app) {
     int ww = 0, wh = 0;
     SDL_GetRenderOutputSize(app->renderer, &ww, &wh);
-    float scale_x = (float)ww / (float)BASE_W;
-    float scale_y = (float)wh / (float)BASE_H;
-    float scale = scale_x < scale_y ? scale_x : scale_y;
-    if (app->integer_scale || app->scale_mode == SCALE_INTEGER_NEAREST) {
-        int iscale = (int)floorf(scale);
-        if (iscale < 1) iscale = 1;
-        scale = (float)iscale;
+    /* Square 1:1 pixels, fixed 512x480 presentation (vertical line doubling).
+       No aspect correction, no resize on switching. */
+    const float target_aspect = (float)BASE_W / (float)BASE_H;
+    float w = (float)ww, h = (float)ww / target_aspect;
+    if (h > (float)wh) {
+        h = (float)wh;
+        w = h * target_aspect;
     }
-    float w = BASE_W * scale;
-    float h = BASE_H * scale;
+    if (app->integer_scale || app->scale_mode == SCALE_INTEGER_NEAREST) {
+        int iscale_w = (int)(w / (float)BASE_W);
+        int iscale_h = (int)(h / (float)BASE_H);
+        int iscale = iscale_w < iscale_h ? iscale_w : iscale_h;
+        if (iscale < 1) iscale = 1;
+        w = (float)BASE_W * (float)iscale;
+        h = (float)BASE_H * (float)iscale;
+    }
     return (SDL_FRect){ floorf(((float)ww - w) * 0.5f), floorf(((float)wh - h) * 0.5f), floorf(w), floorf(h) };
 }
 
@@ -327,16 +335,18 @@ static float cubic(float v0, float v1, float v2, float v3, float t) {
     return p * t * t * t + q * t * t + r * t + v1;
 }
 
-static uint32_t sample_bicubic(const uint16_t *src, float x, float y) {
+static uint32_t sample_bicubic_active(const uint16_t *src, float x, float y, int active_w, int active_h) {
+    if (active_w < 1) active_w = BASE_W;
+    if (active_h < 1) active_h = BASE_H;
     int ix = (int)floorf(x), iy = (int)floorf(y);
     float tx = x - ix, ty = y - iy;
     float chan[3][4];
     for (int m = -1; m <= 2; m++) {
-        int yy = iy + m; if (yy < 0) yy = 0; if (yy >= BASE_H) yy = BASE_H - 1;
+        int yy = iy + m; if (yy < 0) yy = 0; if (yy >= active_h) yy = active_h - 1;
         float row[3][4];
         for (int n = -1; n <= 2; n++) {
-            int xx = ix + n; if (xx < 0) xx = 0; if (xx >= BASE_W) xx = BASE_W - 1;
-            uint32_t c = rgb555_to_argb(src[yy * BASE_W + xx]);
+            int xx = ix + n; if (xx < 0) xx = 0; if (xx >= active_w) xx = active_w - 1;
+            uint32_t c = rgb555_to_argb(src[yy * VIDEO_OUTPUT_WIDTH + xx]);
             row[0][n+1] = (float)((c >> 16) & 0xFF);
             row[1][n+1] = (float)((c >> 8) & 0xFF);
             row[2][n+1] = (float)(c & 0xFF);
@@ -369,6 +379,9 @@ static void render_pixels(App *app, const uint16_t *fb) {
     SDL_FRect vp = calc_viewport(app);
     SDL_SetRenderDrawColor(app->renderer, 8, 10, 18, 255);
     SDL_RenderClear(app->renderer);
+    /* Fixed 512x480 square presentation (no resize on switching). */
+    static uint16_t presented[VIDEO_PRESENT_WIDTH * VIDEO_PRESENT_HEIGHT];
+    video_present_frame(presented);
     if (app->scale_mode == SCALE_BICUBIC) {
         int w = (int)vp.w, h = (int)vp.h;
         if (ensure_bicubic_texture(app, w, h)) {
@@ -376,7 +389,7 @@ static void render_pixels(App *app, const uint16_t *fb) {
                 float sy = ((float)y + 0.5f) * (float)BASE_H / (float)h - 0.5f;
                 for (int x = 0; x < w; x++) {
                     float sx = ((float)x + 0.5f) * (float)BASE_W / (float)w - 0.5f;
-                    app->bicubic_pixels[y * w + x] = sample_bicubic(fb, sx, sy);
+                    app->bicubic_pixels[y * w + x] = sample_bicubic_active(presented, sx, sy, BASE_W, BASE_H);
                 }
             }
             SDL_UpdateTexture(app->bicubic_tex, NULL, app->bicubic_pixels, w * (int)sizeof(uint32_t));
@@ -385,7 +398,7 @@ static void render_pixels(App *app, const uint16_t *fb) {
         }
     } else {
         SDL_SetTextureScaleMode(app->frame_tex, app->scale_mode == SCALE_LINEAR ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
-        SDL_UpdateTexture(app->frame_tex, NULL, fb, BASE_W * (int)sizeof(uint16_t));
+        SDL_UpdateTexture(app->frame_tex, NULL, presented, BASE_W * (int)sizeof(uint16_t));
         SDL_RenderTexture(app->renderer, app->frame_tex, NULL, &vp);
     }
 }
@@ -533,7 +546,16 @@ static void record_current_cmdlist_frame(App *app) {
         return;
     }
     video_get_state_blob(state, state_size);
-    if (loopy_cmdlist_writer_write_frame(&app->cmd_writer, app->emu_frame, state, state_size, system_get_display_output()) != 0) {
+    /* Megadoc active area only, tightly packed (stride-aware copy). */
+    int active_w = video_get_display_active_width();
+    int active_h = video_get_display_active_height();
+    if (active_w != 256 && active_w != 512) active_w = VIDEO_OUTPUT_WIDTH;
+    if (active_h != 224 && active_h != 240) active_h = VIDEO_DISPLAY_HEIGHT;
+    const uint16_t *src = system_get_display_output();
+    static uint16_t record_tight[VIDEO_OUTPUT_WIDTH * VIDEO_DISPLAY_HEIGHT];
+    for (int y = 0; y < active_h; y++)
+        memcpy(&record_tight[y * active_w], &src[y * VIDEO_OUTPUT_WIDTH], (size_t)active_w * sizeof(uint16_t));
+    if (loopy_cmdlist_writer_write_frame(&app->cmd_writer, app->emu_frame, state, state_size, record_tight, (uint32_t)active_w, (uint32_t)active_h) != 0) {
         set_message(app, "Cmdlist write failed");
         loopy_cmdlist_writer_close(&app->cmd_writer);
         app->cmd_writer_open = false;
@@ -833,14 +855,13 @@ static void poll_events(App *app) {
 static SDL_FRect replay_calc_viewport(ReplayApp *app) {
     int ww = 0, wh = 0;
     SDL_GetRenderOutputSize(app->renderer, &ww, &wh);
-    float scale_x = (float)ww / (float)BASE_W;
-    float scale_y = (float)wh / (float)BASE_H;
-    float scale = scale_x < scale_y ? scale_x : scale_y;
-    int iscale = (int)floorf(scale);
-    if (iscale < 1) iscale = 1;
-    scale = (float)iscale;
-    float w = BASE_W * scale;
-    float h = BASE_H * scale;
+    /* Megadoc 4:3, never 1:1. */
+    const float target_aspect = 4.0f / 3.0f;
+    float w = (float)ww, h = (float)ww / target_aspect;
+    if (h > (float)wh) {
+        h = (float)wh;
+        w = h * target_aspect;
+    }
     return (SDL_FRect){ floorf(((float)ww - w) * 0.5f), floorf(((float)wh - h) * 0.5f), floorf(w), floorf(h) };
 }
 
@@ -901,12 +922,11 @@ static bool replay_render_frame_from_state(ReplayApp *app, uint32_t frame) {
         video_set_state_blob(state, state_size);
         video_start_frame();
         int lines = video_get_display_active_height();
-        if (lines < 0) lines = 0;
-        if (lines > BASE_H) lines = BASE_H;
+        if (lines != 224 && lines != 240) lines = 240;
         for (int y = 0; y < lines; y++) {
             video_renderer_draw_scanline(y);
         }
-        memcpy(app->pixels, video_get_display_output(), (size_t)BASE_W * BASE_H * sizeof(uint16_t));
+        video_present_frame(app->pixels);
         ok = true;
     }
     free(state);
@@ -922,9 +942,40 @@ static void replay_load_frame(ReplayApp *app, uint32_t frame) {
         app->rendered_from_state = true;
         return;
     }
-    if (loopy_cmdlist_reader_read_framebuffer(&app->reader, frame, app->pixels, BASE_W * BASE_H) == 0) {
-        app->frame_index = frame;
+    /* Stored-framebuffer fallback: present tight file active to fixed
+       512x480 (horizontal/vertical doubling, padding). */
+    uint32_t fsize = app->reader.frames[frame].framebuffer_size;
+    uint32_t fw = 0, fh = 0;
+    if (fsize == 256u*224u*2u) { fw = 256; fh = 224; }
+    else if (fsize == 256u*240u*2u) { fw = 256; fh = 240; }
+    else if (fsize == 512u*224u*2u) { fw = 512; fh = 224; }
+    else if (fsize == 512u*240u*2u) { fw = 512; fh = 240; }
+    else return;
+    static uint16_t stored_tight[VIDEO_OUTPUT_WIDTH * VIDEO_DISPLAY_HEIGHT];
+    if (loopy_cmdlist_reader_read_framebuffer(&app->reader, frame, stored_tight, VIDEO_OUTPUT_WIDTH * VIDEO_DISPLAY_HEIGHT) != 0) return;
+    const int doubled_h = (int)fh * 2;
+    const int pad_top = (VIDEO_PRESENT_HEIGHT - doubled_h) / 2;
+    for (int y = 0; y < VIDEO_PRESENT_HEIGHT; y++) {
+        uint16_t *dst_row = &app->pixels[y * BASE_W];
+        int src_y = (y - pad_top) / 2;
+        if (y < pad_top || src_y < 0 || src_y >= (int)fh) {
+            for (int x = 0; x < BASE_W; x++) dst_row[x] = 0;
+            continue;
+        }
+        const uint16_t *src_row = &stored_tight[src_y * fw];
+        if (fw == 512) {
+            for (int x = 0; x < 512; x++) dst_row[x] = src_row[x];
+        } else {
+            for (int x = 0; x < 256; x++) {
+                uint16_t c = src_row[x];
+                dst_row[x << 1] = c;
+                dst_row[(x << 1) + 1] = c;
+            }
+        }
     }
+    app->frame_index = frame;
+    app->stored_fw = VIDEO_PRESENT_WIDTH;
+    app->stored_fh = VIDEO_PRESENT_HEIGHT;
 }
 
 static void replay_toggle_fullscreen(ReplayApp *app) {
@@ -963,8 +1014,19 @@ static void replay_render(ReplayApp *app) {
     SDL_FRect vp = replay_calc_viewport(app);
     SDL_SetRenderDrawColor(app->renderer, 8, 10, 18, 255);
     SDL_RenderClear(app->renderer);
+    /* Fixed 512x480 square presentation (no resize on switching). */
+    int fw = BASE_W, fh = BASE_H;
+    if (!app->rendered_from_state) {
+        fw = (int)app->stored_fw;
+        fh = (int)app->stored_fh;
+        if (fw != BASE_W) fw = BASE_W;
+        if (fh != BASE_H) fh = BASE_H;
+    }
+    if (fw > BASE_W) fw = BASE_W;
+    if (fh > BASE_H) fh = BASE_H;
+    SDL_FRect src = { 0.0f, 0.0f, (float)fw, (float)fh };
     SDL_UpdateTexture(app->frame_tex, NULL, app->pixels, BASE_W * (int)sizeof(uint16_t));
-    SDL_RenderTexture(app->renderer, app->frame_tex, NULL, &vp);
+    SDL_RenderTexture(app->renderer, app->frame_tex, &src, &vp);
 
     char line[160];
     snprintf(line, sizeof(line), "Cmdlist replay  frame %u/%u  %s  %s", app->frame_index + 1, app->reader.frame_count, app->playing ? "playing" : "paused", app->rendered_from_state ? "state-render" : "stored-fb");
@@ -987,7 +1049,8 @@ static int run_cmdlist_replay(const char *path, uint32_t frame_limit) {
         fprintf(stderr, "Failed to open command list: %s\n", path ? path : "(null)");
         return 1;
     }
-    if (app.reader.width != BASE_W || app.reader.height != BASE_H || !app.reader.frame_count) {
+    if (((app.reader.width != BASE_W && app.reader.width != VIDEO_DISPLAY_WIDTH) ||
+         (app.reader.height != BASE_H && app.reader.height != 224)) || !app.reader.frame_count) {
         fprintf(stderr, "Unsupported or empty command list: %s\n", path ? path : "(null)");
         loopy_cmdlist_reader_close(&app.reader);
         return 1;

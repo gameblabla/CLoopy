@@ -42,9 +42,13 @@ int loopy_cmdlist_writer_open(LoopyCmdListWriter *writer, const char *path, uint
     return 0;
 }
 
-int loopy_cmdlist_writer_write_frame(LoopyCmdListWriter *writer, uint32_t frame_index, const void *vdp_state, uint32_t vdp_state_size, const uint16_t *framebuffer) {
+int loopy_cmdlist_writer_write_frame(LoopyCmdListWriter *writer, uint32_t frame_index, const void *vdp_state, uint32_t vdp_state_size, const uint16_t *framebuffer, uint32_t active_w, uint32_t active_h) {
     if (!writer || !writer->file || !framebuffer) return -1;
-    const uint32_t fb_size = writer->width * writer->height * (uint32_t)sizeof(uint16_t);
+    /* Megadoc active area only (no border): per-frame size varies with
+       BLEND_MODE (256/512) and VDP.MODE (224/240), supporting switching. */
+    if (active_w != 256u && active_w != 512u) return -1;
+    if (active_h != 224u && active_h != 240u) return -1;
+    const uint32_t fb_size = active_w * active_h * (uint32_t)sizeof(uint16_t);
     if (vdp_state_size && !vdp_state) return -1;
 
     if (write_exact(writer->file, FRAME_MAGIC, sizeof(FRAME_MAGIC)) != 0 ||
@@ -52,6 +56,7 @@ int loopy_cmdlist_writer_write_frame(LoopyCmdListWriter *writer, uint32_t frame_
         write_u32(writer->file, vdp_state_size) != 0 ||
         write_u32(writer->file, fb_size) != 0) return -1;
     if (vdp_state_size && write_exact(writer->file, vdp_state, vdp_state_size) != 0) return -1;
+    /* Caller provides active area tightly packed (no border, no stride gaps). */
     if (write_exact(writer->file, framebuffer, fb_size) != 0) return -1;
 
     writer->frame_count++;
@@ -118,8 +123,9 @@ int loopy_cmdlist_reader_open(LoopyCmdListReader *reader, const char *path) {
             loopy_cmdlist_reader_close(reader);
             return -1;
         }
-        const uint32_t expected_fb_size = reader->width * reader->height * (uint32_t)sizeof(uint16_t);
-        if (info->framebuffer_size != expected_fb_size) {
+        /* Per-frame active size varies (256/512 x 224/240) with switching. */
+        if (info->framebuffer_size != 256u*224u*2u && info->framebuffer_size != 256u*240u*2u &&
+            info->framebuffer_size != 512u*224u*2u && info->framebuffer_size != 512u*240u*2u) {
             loopy_cmdlist_reader_close(reader);
             return -1;
         }

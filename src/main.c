@@ -131,6 +131,7 @@ static int is_little_romance_rom(const char *path) {
 
 typedef struct HeadlessY4MWriter {
     FILE *file;
+    int header_written;
 } HeadlessY4MWriter;
 
 static unsigned char clamp_u8(int v) {
@@ -141,36 +142,41 @@ static unsigned char clamp_u8(int v) {
 
 static int y4m_open(HeadlessY4MWriter *w, const char *path) {
     if (!w || !path) return -1;
+    memset(w, 0, sizeof(*w));
     w->file = fopen(path, "wb");
     if (!w->file) return -1;
-    /* NTSC Loopy timing is about 59.8261 Hz.  Use 598261/10000 so the
-       inspection stream preserves emulator frame cadence without needing a
-       nonstandard floating-point framerate. */
-    fprintf(w->file, "YUV4MPEG2 W256 H240 F598261:10000 Ip A1:1 C444\n");
-    return ferror(w->file) ? -1 : 0;
+    return 0;
 }
 
 static void y4m_write_frame(HeadlessY4MWriter *w) {
     if (!w || !w->file) return;
-    const uint16_t *fb = system_get_display_output();
-    const int count = VIDEO_DISPLAY_WIDTH * VIDEO_DISPLAY_HEIGHT;
+    /* Fixed 512x480 square presentation with padding (no resize on switch). */
+    if (!w->header_written) {
+        fprintf(w->file, "YUV4MPEG2 W512 H480 F598261:10000 Ip A1:1 C444\n");
+        if (ferror(w->file)) return;
+        w->header_written = 1;
+    }
+    static uint16_t presented[VIDEO_PRESENT_WIDTH * VIDEO_PRESENT_HEIGHT];
+    video_present_frame(presented);
+    const int W = VIDEO_PRESENT_WIDTH, H = VIDEO_PRESENT_HEIGHT;
+    const int count = W * H;
     unsigned char *planes = (unsigned char *)malloc((size_t)count * 3u);
     if (!planes) return;
     unsigned char *Y = planes;
     unsigned char *U = planes + count;
     unsigned char *V = planes + count * 2;
     for (int i = 0; i < count; i++) {
-        uint16_t c = fb[i];
-        int r5 = (int)((c >> 10) & 31u);
-        int g5 = (int)((c >> 5) & 31u);
-        int b5 = (int)(c & 31u);
-        int r = (r5 << 3) | (r5 >> 2);
-        int g = (g5 << 3) | (g5 >> 2);
-        int b = (b5 << 3) | (b5 >> 2);
-        /* BT.601 full-range conversion for inspection video. */
-        Y[i] = clamp_u8(( 77 * r + 150 * g +  29 * b) >> 8);
-        U[i] = clamp_u8(128 + ((-43 * r -  85 * g + 128 * b) >> 8));
-        V[i] = clamp_u8(128 + ((128 * r - 107 * g -  21 * b) >> 8));
+            uint16_t c = presented[i];
+            int r5 = (int)((c >> 10) & 31u);
+            int g5 = (int)((c >> 5) & 31u);
+            int b5 = (int)(c & 31u);
+            int r = (r5 << 3) | (r5 >> 2);
+            int g = (g5 << 3) | (g5 >> 2);
+            int b = (b5 << 3) | (b5 >> 2);
+            /* BT.601 full-range conversion for inspection video. */
+            Y[i] = clamp_u8(( 77 * r + 150 * g +  29 * b) >> 8);
+            U[i] = clamp_u8(128 + ((-43 * r -  85 * g + 128 * b) >> 8));
+            V[i] = clamp_u8(128 + ((128 * r - 107 * g -  21 * b) >> 8));
     }
     fputs("FRAME\n", w->file);
     fwrite(Y, 1, (size_t)count, w->file);
@@ -306,9 +312,11 @@ static int run_cmdlist_print_extract(const LoopyLaunchInfo *launch) {
     }
     uint32_t frame = launch->frames_set ? (uint32_t)launch->frames : (total - 1u);
     if (frame >= total) frame = total - 1u;
-    uint16_t *fb = (uint16_t *)malloc((size_t)VIDEO_DISPLAY_WIDTH * VIDEO_DISPLAY_HEIGHT * sizeof(uint16_t));
+    uint16_t *fb = (uint16_t *)malloc((size_t)VIDEO_OUTPUT_WIDTH * VIDEO_DISPLAY_HEIGHT * sizeof(uint16_t));
     if (!fb) { loopy_cmdlist_reader_close(&reader); return 1; }
-    if (loopy_cmdlist_reader_read_framebuffer(&reader, frame, fb, VIDEO_DISPLAY_WIDTH * VIDEO_DISPLAY_HEIGHT) != 0) {
+    uint32_t fb_pixels = reader.width * reader.height;
+    if (fb_pixels > (uint32_t)(VIDEO_OUTPUT_WIDTH * VIDEO_DISPLAY_HEIGHT) ||
+        loopy_cmdlist_reader_read_framebuffer(&reader, frame, fb, VIDEO_OUTPUT_WIDTH * VIDEO_DISPLAY_HEIGHT) != 0) {
         fprintf(stderr, "Could not read command-list frame %u\n", frame);
         free(fb);
         loopy_cmdlist_reader_close(&reader);
@@ -317,7 +325,33 @@ static int run_cmdlist_print_extract(const LoopyLaunchInfo *launch) {
     loopy_io_initialize();
     if (launch->printer_output_dir) loopy_io_printer_set_output_dir(launch->printer_output_dir);
     if (launch->printer_trace) loopy_io_printer_set_trace(true);
-    loopy_io_printer_frame_snapshot(fb, VIDEO_DISPLAY_WIDTH, VIDEO_DISPLAY_HEIGHT);
+    /* Per-frame active size (switching): infer from stored size. */
+    uint32_t frame_bytes = reader.frames[frame].framebuffer_size;
+    uint32_t frame_w = 0, frame_h = 0;
+    if (frame_bytes == 256u*224u*2u) { frame_w = 256; frame_h = 224; }
+    else if (frame_bytes == 256u*240u*2u) { frame_w = 256; frame_h = 240; }
+    else if (frame_bytes == 512u*224u*2u) { frame_w = 512; frame_h = 224; }
+    else if (frame_bytes == 512u*240u*2u) { frame_w = 512; frame_h = 240; }
+    if (frame_w == 512) {
+        static uint16_t printer_tmp[VIDEO_DISPLAY_WIDTH * VIDEO_DISPLAY_HEIGHT];
+        for (uint32_t y = 0; y < frame_h; y++)
+            for (int x = 0; x < VIDEO_DISPLAY_WIDTH; x++) {
+                uint16_t a = fb[y * 512u + (x << 1)];
+                uint16_t b = fb[y * 512u + (x << 1) + 1];
+                int ar = (a >> 10) & 0x1F, ag = (a >> 5) & 0x1F, ab = a & 0x1F;
+                int br = (b >> 10) & 0x1F, bg = (b >> 5) & 0x1F, bb = b & 0x1F;
+                printer_tmp[y * VIDEO_DISPLAY_WIDTH + x] =
+                    (uint16_t)((((ar + br) >> 1) << 10) | (((ag + bg) >> 1) << 5) | ((ab + bb) >> 1));
+            }
+        loopy_io_printer_frame_snapshot(printer_tmp, VIDEO_DISPLAY_WIDTH, frame_h);
+    } else if (frame_w == 256) {
+        loopy_io_printer_frame_snapshot(fb, VIDEO_DISPLAY_WIDTH, frame_h);
+    } else {
+        fprintf(stderr, "Unsupported framebuffer size %u\n", frame_bytes);
+        free(fb);
+        loopy_cmdlist_reader_close(&reader);
+        return 1;
+    }
     loopy_io_trigger_printer_sensors();
     loopy_io_reg_write16(0x040, 0x00FFu);
     loopy_io_reg_write16(0x042, 0x5A51u);

@@ -368,26 +368,22 @@ uint32_t loopy_wasm_get_framebuffer_rgb555(void) { return (uint32_t)(uintptr_t)s
 __attribute__((export_name("loopy_wasm_get_framebuffer_rgba")))
 uint32_t loopy_wasm_get_framebuffer_rgba(void)
 {
-    const uint32_t w = VIDEO_DISPLAY_WIDTH;
-    const uint32_t h = (uint32_t)video_get_display_active_height();
-    const uint32_t y_off = (uint32_t)video_get_display_active_y_offset();
+    /* Fixed 512x480 square presentation via vertical line doubling. */
+    const uint32_t w = VIDEO_PRESENT_WIDTH;
+    const uint32_t h = VIDEO_PRESENT_HEIGHT;
     uint32_t need = w * h * 4u;
     if(rgba_fb_size < need) { rgba_fb = (uint8_t*)malloc(need); rgba_fb_size = rgba_fb ? need : 0; }
     if(!rgba_fb) return 0;
-    const uint16_t *src = system_get_display_output();
-    for(uint32_t y = 0; y < h; y++) {
-        const uint32_t src_y = y + y_off;
-        for(uint32_t x = 0; x < w; x++) rgb555_to_rgba(src[src_y * VIDEO_DISPLAY_WIDTH + x], rgba_fb + ((y * w + x) * 4u));
-    }
+    static uint16_t presented[VIDEO_PRESENT_WIDTH * VIDEO_PRESENT_HEIGHT];
+    video_present_frame(presented);
+    for(uint32_t i = 0; i < w * h; i++) rgb555_to_rgba(presented[i], rgba_fb + (i * 4u));
     return (uint32_t)(uintptr_t)rgba_fb;
 }
 
-__attribute__((export_name("loopy_wasm_get_width"))) uint32_t loopy_wasm_get_width(void) { return VIDEO_DISPLAY_WIDTH; }
-__attribute__((export_name("loopy_wasm_get_height"))) uint32_t loopy_wasm_get_height(void) { return (uint32_t)video_get_display_active_height(); }
+__attribute__((export_name("loopy_wasm_get_width"))) uint32_t loopy_wasm_get_width(void) { return VIDEO_PRESENT_WIDTH; }
+__attribute__((export_name("loopy_wasm_get_height"))) uint32_t loopy_wasm_get_height(void) { return VIDEO_PRESENT_HEIGHT; }
 __attribute__((export_name("loopy_wasm_get_active_height"))) uint32_t loopy_wasm_get_active_height(void) { return (uint32_t)video_get_display_active_height(); }
 __attribute__((export_name("loopy_wasm_get_full_height"))) uint32_t loopy_wasm_get_full_height(void) { return VIDEO_DISPLAY_HEIGHT; }
-__attribute__((export_name("loopy_wasm_get_y_offset"))) uint32_t loopy_wasm_get_y_offset(void) { return (uint32_t)video_get_display_active_y_offset(); }
-__attribute__((export_name("loopy_wasm_get_active_y_offset"))) uint32_t loopy_wasm_get_active_y_offset(void) { return (uint32_t)video_get_display_active_y_offset(); }
 __attribute__((export_name("loopy_wasm_get_status"))) uint32_t loopy_wasm_get_status(void) { return status_code; }
 __attribute__((export_name("loopy_wasm_get_error"))) uint32_t loopy_wasm_get_error(void) { return error_code; }
 __attribute__((export_name("loopy_wasm_get_frame_count"))) uint32_t loopy_wasm_get_frame_count(void) { return frame_counter; }

@@ -124,7 +124,10 @@ static void dump_bmp(const char *name, uint16_t *data)
     FILE *bmp_file = fopen(path, "wb");
     if (!bmp_file) return;
 
-    const int DATA_SIZE = (VIDEO_DISPLAY_WIDTH * VIDEO_DISPLAY_HEIGHT * 2);
+    /* Active area only, no border. Stride is VIDEO_OUTPUT_WIDTH. */
+    const int W = video_get_display_active_width();
+    const int H = video_get_display_active_height();
+    const int DATA_SIZE = (W * H * 2);
     const int DATA_OFFSET = 0x36;
     const int FILE_SIZE = DATA_OFFSET + DATA_SIZE;
     uint8_t header[0x36] = {
@@ -133,8 +136,8 @@ static void dump_bmp(const char *name, uint16_t *data)
         0, 0, 0, 0,
         DATA_OFFSET, 0, 0, 0,
         0x28, 0, 0, 0,
-        (uint8_t)(VIDEO_DISPLAY_WIDTH >> 0), (uint8_t)(VIDEO_DISPLAY_WIDTH >> 8), 0, 0,
-        (uint8_t)(VIDEO_DISPLAY_HEIGHT >> 0), (uint8_t)(VIDEO_DISPLAY_HEIGHT >> 8), 0, 0,
+        (uint8_t)(W >> 0), (uint8_t)(W >> 8), 0, 0,
+        (uint8_t)(H >> 0), (uint8_t)(H >> 8), 0, 0,
         1, 0,
         16, 0,
         0, 0, 0, 0,
@@ -145,9 +148,12 @@ static void dump_bmp(const char *name, uint16_t *data)
         0, 0, 0, 0
     };
     fwrite(header, 1, sizeof(header), bmp_file);
-    for (int y = 0; y < VIDEO_DISPLAY_HEIGHT; y++) {
-        int flipped_y = VIDEO_DISPLAY_HEIGHT - y - 1;
-        fwrite(data + flipped_y * VIDEO_DISPLAY_WIDTH, sizeof(uint16_t), VIDEO_DISPLAY_WIDTH, bmp_file);
+    for (int y = 0; y < H; y++) {
+        int flipped_y = H - y - 1;
+        /* Active rows are packed from row 0 (no border offset). */
+        uint16_t *row = data + flipped_y * VIDEO_OUTPUT_WIDTH;
+        /* For 256 modes only the first 256 of the 512 stride are active. */
+        fwrite(row, sizeof(uint16_t), W, bmp_file);
     }
     fclose(bmp_file);
 }
@@ -192,7 +198,31 @@ static void vsync_start()
 		sh7021_ocpm_intc_deassert_irq(irq_id);
 	}
 
-	loopy_io_printer_frame_snapshot(vdp.display_output, VIDEO_DISPLAY_WIDTH, VIDEO_DISPLAY_HEIGHT);
+	{
+		/* Printer is 256 wide, active area only. 256 display frames copy
+		   the active 256; 512 hi-res frames average pairs to 256. */
+		const int AW = video_get_display_active_width();
+		const int AH = video_get_display_active_height();
+		static uint16_t printer_active[VIDEO_DISPLAY_WIDTH * VIDEO_DISPLAY_HEIGHT];
+		if (AW == VIDEO_DISPLAY_WIDTH) {
+			for (int y = 0; y < AH; y++)
+				memcpy(&printer_active[y * VIDEO_DISPLAY_WIDTH],
+				       &vdp.display_output[y * VIDEO_OUTPUT_WIDTH],
+				       VIDEO_DISPLAY_WIDTH * sizeof(uint16_t));
+		} else {
+			for (int y = 0; y < AH; y++) {
+				for (int x = 0; x < VIDEO_DISPLAY_WIDTH; x++) {
+					uint16_t a = vdp.display_output[y * VIDEO_OUTPUT_WIDTH + (x << 1)];
+					uint16_t b = vdp.display_output[y * VIDEO_OUTPUT_WIDTH + (x << 1) + 1];
+					int ar = (a >> 10) & 0x1F, ag = (a >> 5) & 0x1F, ab = a & 0x1F;
+					int br = (b >> 10) & 0x1F, bg = (b >> 5) & 0x1F, bb = b & 0x1F;
+					printer_active[y * VIDEO_DISPLAY_WIDTH + x] =
+						(uint16_t)((((ar + br) >> 1) << 10) | (((ag + bg) >> 1) << 5) | ((ab + bb) >> 1));
+				}
+			}
+		}
+		loopy_io_printer_frame_snapshot(printer_active, VIDEO_DISPLAY_WIDTH, AH);
+	}
 	if (bmp_dump_enabled) dump_bmp("output_display", vdp.display_output);
 	//dump_all_bmps();
 	//dump_for_serial();
@@ -270,7 +300,7 @@ void video_initialize()
 		vdp.bitmap_output[i] = (uint16_t *)calloc(VIDEO_DISPLAY_WIDTH * VIDEO_DISPLAY_HEIGHT, sizeof(uint16_t));
 	}
 
-	vdp.display_output = (uint16_t *)calloc(VIDEO_DISPLAY_WIDTH * VIDEO_DISPLAY_HEIGHT, sizeof(uint16_t));
+	vdp.display_output = (uint16_t *)calloc(VIDEO_OUTPUT_WIDTH * VIDEO_DISPLAY_HEIGHT, sizeof(uint16_t));
 
 	vcount_func = timing_register_func("Video::inc_vcount", inc_vcount);
 	hsync_func = timing_register_func("Video::start_hsync", start_hsync);
@@ -298,6 +328,7 @@ void video_start_frame()
 	vdp.frame_ended = false;
 
 	const size_t BUFFER_SIZE = VIDEO_DISPLAY_WIDTH * VIDEO_DISPLAY_HEIGHT * sizeof(uint16_t);
+	const size_t DISPLAY_BUFFER_SIZE = VIDEO_OUTPUT_WIDTH * VIDEO_DISPLAY_HEIGHT * sizeof(uint16_t);
 
 	//Clear the output buffers
 	for (int i = 0; i < 2; i++)
@@ -309,7 +340,7 @@ void video_start_frame()
 		memset(vdp.screen_output[i], 0, BUFFER_SIZE);
 	}
 
-	memset(vdp.display_output, 0, BUFFER_SIZE);
+	memset(vdp.display_output, 0, DISPLAY_BUFFER_SIZE);
 }
 
 bool video_check_frame_end()
@@ -327,9 +358,41 @@ int video_get_display_active_height(void)
 	return vdp.mode.extra_scanlines ? VIDEO_DISPLAY_HEIGHT : 0xE0;
 }
 
-int video_get_display_active_y_offset(void)
+int video_get_display_active_width(void)
 {
-	return vdp.mode.extra_scanlines ? 0 : 8;
+	/* Megadoc BLEND_MODE 3 "Hi-res / interleave" doubles horizontal
+	   resolution to 512 starting with screen A. */
+	return vdp.dispmode == 0x03 ? VIDEO_OUTPUT_WIDTH : VIDEO_DISPLAY_WIDTH;
+}
+
+void video_present_frame(uint16_t *dst)
+{
+	if (!dst) return;
+	const int AW = video_get_display_active_width();
+	const int AH = video_get_display_active_height();
+	const int W = (AW == 512) ? 512 : 256;
+	const int H = (AH == 240) ? 240 : 224;
+	/* Vertical line doubling with top/bottom padding to fixed 480. */
+	const int doubled_h = H * 2;
+	const int pad_top = (VIDEO_PRESENT_HEIGHT - doubled_h) / 2;
+	for (int y = 0; y < VIDEO_PRESENT_HEIGHT; y++) {
+		uint16_t *dst_row = dst + y * VIDEO_PRESENT_WIDTH;
+		int src_y = (y - pad_top) / 2;
+		if ((y < pad_top) || (src_y < 0) || (src_y >= H)) {
+			for (int x = 0; x < VIDEO_PRESENT_WIDTH; x++) dst_row[x] = 0;
+			continue;
+		}
+		const uint16_t *src_row = vdp.display_output + src_y * VIDEO_OUTPUT_WIDTH;
+		if (W == 512) {
+			for (int x = 0; x < 512; x++) dst_row[x] = src_row[x];
+		} else {
+			for (int x = 0; x < 256; x++) {
+				uint16_t c = src_row[x];
+				dst_row[x << 1] = c;
+				dst_row[(x << 1) + 1] = c;
+			}
+		}
+	}
 }
 
 void video_dump_for_serial()

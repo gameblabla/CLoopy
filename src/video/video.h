@@ -9,6 +9,12 @@
 //Output is always 240 lines tall, even in 224-line mode
 #define VIDEO_DISPLAY_HEIGHT 0xF0
 
+/* Megadoc BLEND_MODE 3 "Hi-res / interleave": screens A and B at half-pixel
+   width, 512 pixels starting with screen A in the same active time as
+   256-pixel modes. Display stride is always 512; active width is 256/512. */
+#define VIDEO_OUTPUT_WIDTH 0x200
+#define VIDEO_OUTPUT_HEIGHT 0xF0
+
 #define VIDEO_BITMAP_VRAM_START 0x04000000
 #define VIDEO_BITMAP_VRAM_SIZE 0x20000
 #define VIDEO_BITMAP_VRAM_END VIDEO_BITMAP_VRAM_START + VIDEO_BITMAP_VRAM_SIZE
@@ -66,7 +72,17 @@ bool video_check_frame_end();
 
 uint16_t* video_get_display_output();
 int video_get_display_active_height(void);
-int video_get_display_active_y_offset(void);
+/* Megadoc BLEND_MODE 3 "Hi-res / interleave" is 512 pixels wide, all other
+   blend modes are 256. Active area height is 224/240 via VDP.MODE. */
+int video_get_display_active_width(void);
+
+/* Presentation: vertical line doubling to fixed square pixels.
+   Internal framebuffer stays native active (256/512 x 224/240, stride 512);
+   cores call this to present. 256-wide lines are doubled horizontally,
+   all lines doubled vertically; 224-high is padded top/bottom. */
+#define VIDEO_PRESENT_WIDTH 512
+#define VIDEO_PRESENT_HEIGHT 480
+void video_present_frame(uint16_t *dst);
 
 void video_dump_for_serial();
 /* Side-effect-free read of VDP memory for inspection, taking a translated

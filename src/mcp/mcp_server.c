@@ -380,18 +380,24 @@ static void tool_screenshot(const JsonValue *args, JsonWriter *t) {
     if (!fb) { json_write_raw(t, "error: no framebuffer\n"); return; }
     FILE *f = fopen(path, "wb");
     if (!f) { json_write_fmt(t, "error: cannot open %s\n", path); return; }
-    /* Binary PPM: no encoder needed and every image tool reads it. */
-    fprintf(f, "P6\n%d %d\n255\n", VIDEO_DISPLAY_WIDTH, VIDEO_DISPLAY_HEIGHT);
-    for (int i = 0; i < VIDEO_DISPLAY_WIDTH * VIDEO_DISPLAY_HEIGHT; i++) {
-        uint16_t c = fb[i];
-        int r5 = (c >> 10) & 31, g5 = (c >> 5) & 31, b5 = c & 31;
-        fputc((r5 << 3) | (r5 >> 2), f);
-        fputc((g5 << 3) | (g5 >> 2), f);
-        fputc((b5 << 3) | (b5 >> 2), f);
+    /* Binary PPM: Megadoc active area only (no border), stride-aware. */
+    int active_w = video_get_display_active_width();
+    int active_h = video_get_display_active_height();
+    if (active_w != 256 && active_w != 512) active_w = VIDEO_OUTPUT_WIDTH;
+    if (active_h != 224 && active_h != 240) active_h = VIDEO_DISPLAY_HEIGHT;
+    fprintf(f, "P6\n%d %d\n255\n", active_w, active_h);
+    for (int y = 0; y < active_h; y++) {
+        for (int x = 0; x < active_w; x++) {
+            uint16_t c = fb[y * VIDEO_OUTPUT_WIDTH + x];
+            int r5 = (c >> 10) & 31, g5 = (c >> 5) & 31, b5 = c & 31;
+            fputc((r5 << 3) | (r5 >> 2), f);
+            fputc((g5 << 3) | (g5 >> 2), f);
+            fputc((b5 << 3) | (b5 >> 2), f);
+        }
     }
     fclose(f);
     json_write_fmt(t, "Wrote %dx%d PPM screenshot to %s (frame %llu).\n",
-                   VIDEO_DISPLAY_WIDTH, VIDEO_DISPLAY_HEIGHT, path,
+                   active_w, active_h, path,
                    (unsigned long long)loopy_debug_frame_count());
 }
 

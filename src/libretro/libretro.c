@@ -157,11 +157,11 @@ void retro_get_system_info(struct retro_system_info *info) {
 
 void retro_get_system_av_info(struct retro_system_av_info *info) {
     memset(info, 0, sizeof(*info));
-    info->geometry.base_width = VIDEO_DISPLAY_WIDTH;
-    info->geometry.base_height = VIDEO_DISPLAY_HEIGHT;
-    info->geometry.max_width = VIDEO_DISPLAY_WIDTH;
-    info->geometry.max_height = VIDEO_DISPLAY_HEIGHT;
-    info->geometry.aspect_ratio = 4.0f / 3.0f;
+    info->geometry.base_width = VIDEO_PRESENT_WIDTH;
+    info->geometry.base_height = VIDEO_PRESENT_HEIGHT;
+    info->geometry.max_width = VIDEO_PRESENT_WIDTH;
+    info->geometry.max_height = VIDEO_PRESENT_HEIGHT;
+    info->geometry.aspect_ratio = 0.0f;
     info->timing.fps = LOOPY_FPS;
     info->timing.sample_rate = (double)SOUND_TARGET_SAMPLE_RATE;
 }
@@ -383,13 +383,11 @@ void retro_run(void) {
     poll_input();
     system_run();
 
-    /* The VDP can show 224 or 240 active lines; report only the active window
-       so the frontend does not letterbox blank borders into the picture. */
-    int active_h = video_get_display_active_height();
-    int y_off = video_get_display_active_y_offset();
-    const uint16_t *fb = system_get_display_output();
-    if (video_cb) video_cb(fb + (size_t)y_off * VIDEO_DISPLAY_WIDTH, VIDEO_DISPLAY_WIDTH, (unsigned)active_h,
-                           VIDEO_DISPLAY_WIDTH * sizeof(uint16_t));
+    /* Fixed 512x480 square presentation (vertical line doubling, no resize). */
+    static uint16_t presented[VIDEO_PRESENT_WIDTH * VIDEO_PRESENT_HEIGHT];
+    video_present_frame(presented);
+    if (video_cb) video_cb(presented, VIDEO_PRESENT_WIDTH, VIDEO_PRESENT_HEIGHT,
+                           VIDEO_PRESENT_WIDTH * sizeof(uint16_t));
 
     run_frame_audio();
 }

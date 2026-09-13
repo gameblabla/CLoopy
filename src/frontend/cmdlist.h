@@ -39,7 +39,7 @@ typedef struct LoopyCmdListReader {
 } LoopyCmdListReader;
 
 int loopy_cmdlist_writer_open(LoopyCmdListWriter *writer, const char *path, uint32_t width, uint32_t height);
-int loopy_cmdlist_writer_write_frame(LoopyCmdListWriter *writer, uint32_t frame_index, const void *vdp_state, uint32_t vdp_state_size, const uint16_t *framebuffer);
+int loopy_cmdlist_writer_write_frame(LoopyCmdListWriter *writer, uint32_t frame_index, const void *vdp_state, uint32_t vdp_state_size, const uint16_t *framebuffer, uint32_t active_w, uint32_t active_h);
 int loopy_cmdlist_writer_close(LoopyCmdListWriter *writer);
 
 int loopy_cmdlist_reader_open(LoopyCmdListReader *reader, const char *path);

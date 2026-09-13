@@ -50,52 +50,33 @@ static void write_screen(int index, int x, uint8_t value)
 
 static void write_color(uint16_t * buffer, int x, int y, uint16_t value)
 {
-	x &= 0x1FF;
-
-	//Layer output is always 240 lines long, even in 224-line mode
-	//This just centers the picture for 224-line mode
-	if (!vdp.mode.extra_scanlines)
-	{
-		y += 8;
-	}
-
-	if (x < VIDEO_DISPLAY_WIDTH)
+	/* Layer and screen images hold the active area only (no border).
+	   Megadoc: active area 256x224/240, border outside is backdrop. */
+	x &= 0xFF;
+	if (x < VIDEO_DISPLAY_WIDTH && y >= 0 && y < VIDEO_DISPLAY_HEIGHT)
 	{
 		buffer[x + (y * VIDEO_DISPLAY_WIDTH)] = value;
 	}
 }
 
-static void fill_224_mode_vertical_borders(void)
+/* Megadoc BLEND_MODE final output. Active area only, stride is
+   VIDEO_OUTPUT_WIDTH (512) so 256 and 512 scanlines share one buffer. */
+static void write_blended_output_pixel(int x, int y, uint16_t value)
 {
-	/* In 224-line mode the active 256x224 picture is centered inside
-	   the 240-line video field.  The eight lines above and below are
-	   outside the active render area and are colored by screen A's
-	   backdrop; they must not retain stale framebuffer contents. */
-	if (vdp.mode.extra_scanlines)
+	if (x >= 0 && x < VIDEO_DISPLAY_WIDTH && y >= 0 && y < VIDEO_DISPLAY_HEIGHT)
 	{
-		return;
+		vdp.display_output[x + (y * VIDEO_OUTPUT_WIDTH)] = value;
 	}
+}
 
-	const uint16_t color = vdp.backdrops[0];
-	for (int y = 0; y < 8; y++)
-	{
-		for (int x = 0; x < VIDEO_DISPLAY_WIDTH; x++)
-		{
-			vdp.display_output[y * VIDEO_DISPLAY_WIDTH + x] = color;
-			vdp.screen_output[0][y * VIDEO_DISPLAY_WIDTH + x] = color;
-			vdp.screen_output[1][y * VIDEO_DISPLAY_WIDTH + x] = color;
-		}
-	}
-
-	for (int y = VIDEO_DISPLAY_HEIGHT - 8; y < VIDEO_DISPLAY_HEIGHT; y++)
-	{
-		for (int x = 0; x < VIDEO_DISPLAY_WIDTH; x++)
-		{
-			vdp.display_output[y * VIDEO_DISPLAY_WIDTH + x] = color;
-			vdp.screen_output[0][y * VIDEO_DISPLAY_WIDTH + x] = color;
-			vdp.screen_output[1][y * VIDEO_DISPLAY_WIDTH + x] = color;
-		}
-	}
+/* Megadoc BLEND_MODE 3 "Hi-res / interleave": screens A and B at half-pixel
+   width, 512 pixels starting with screen A. */
+static void write_hires_interleave_pair(int x, int y, uint16_t screen_a, uint16_t screen_b)
+{
+	x &= 0xFF;
+	if (y < 0 || y >= VIDEO_DISPLAY_HEIGHT) return;
+	vdp.display_output[(x << 1) + (y * VIDEO_OUTPUT_WIDTH)] = screen_a;
+	vdp.display_output[(x << 1) + 1 + (y * VIDEO_OUTPUT_WIDTH)] = screen_b;
 }
 
 static void write_pal_color(uint16_t * buffer, int x, int y, uint8_t pal_index)
@@ -709,7 +690,7 @@ static void draw_color_math(int y, bool half)
 		out_b = clamp_int(out_b, 0, 0x1F);
 
 		uint16_t output = (out_r << 10) | (out_g << 5) | out_b;
-		write_color(vdp.display_output, x, y, output);
+		write_blended_output_pixel(x, y, output);
 	}
 }
 
@@ -742,7 +723,7 @@ static void draw_screen_overlay(int y, bool screen_b_prio)
 			}
 		}
 
-		write_color(vdp.display_output, x, y, output);
+		write_blended_output_pixel(x, y, output);
 	}
 }
 
@@ -751,32 +732,19 @@ static void draw_single_screen(int y, int screen)
 	bool enabled = screen ? vdp.color_prio.output_screen_b : vdp.color_prio.output_screen_a;
 	for (int x = 0; x < VIDEO_DISPLAY_WIDTH; x++)
 	{
-		write_color(vdp.display_output, x, y, enabled ? read_screen(screen, x) : 0);
+		write_blended_output_pixel(x, y, enabled ? read_screen(screen, x) : 0);
 	}
 }
 
-static uint16_t average_rgb555(uint16_t a, uint16_t b)
+static void draw_blend_hires_interleave(int y)
 {
-	int ar = (a >> 10) & 0x1F;
-	int ag = (a >> 5) & 0x1F;
-	int ab = a & 0x1F;
-	int br = (b >> 10) & 0x1F;
-	int bg = (b >> 5) & 0x1F;
-	int bb = b & 0x1F;
-	return (uint16_t)((((ar + br) >> 1) << 10) | (((ag + bg) >> 1) << 5) | ((ab + bb) >> 1));
-}
-
-static void draw_hires_approx(int y)
-{
-	/* Hardware interleaves screen A and B at half-pixel width.  The renderer is
-	   256 pixels wide, so approximate the 512-pixel output by resolving each
-	   pair into a single RGB555 sample instead of falling into the invalid-mode
-	   assert path. */
+	/* Megadoc BLEND_MODE 3 "Hi-res / interleave": screens A and B at
+	   half-pixel width, 512 pixels starting with screen A. */
 	for (int x = 0; x < VIDEO_DISPLAY_WIDTH; x++)
 	{
 		uint16_t input_a = vdp.color_prio.output_screen_a ? read_screen(0, x) : 0;
 		uint16_t input_b = vdp.color_prio.output_screen_b ? read_screen(1, x) : 0;
-		write_color(vdp.display_output, x, y, average_rgb555(input_a, input_b));
+		write_hires_interleave_pair(x, y, input_a, input_b);
 	}
 }
 
@@ -784,7 +752,7 @@ static void draw_black_scanline(int y)
 {
 	for (int x = 0; x < VIDEO_DISPLAY_WIDTH; x++)
 	{
-		write_color(vdp.display_output, x, y, 0);
+		write_blended_output_pixel(x, y, 0);
 	}
 }
 
@@ -797,15 +765,31 @@ static void write_capture_rgb555(int x, uint16_t color)
 static void display_capture(int y)
 {
     const uint16_t *printer_line = NULL;
+    /* Megadoc scanline capture buffer is always 256 pixels. Display stride
+       is VIDEO_OUTPUT_WIDTH; 256 modes use the first 256 of each row. */
 	switch (vdp.capture_ctrl.format)
 	{
 	case 0x00:
+		if (vdp.dispmode == 0x03)
+		{
+			/* Megadoc: in hi-res the blended output contains only screen B. */
+			for (int x = 0; x < VIDEO_DISPLAY_WIDTH; x++)
+			{
+				uint16_t c = vdp.screen_output[1][y * VIDEO_DISPLAY_WIDTH + x];
+				write_capture_rgb555(x, c);
+			}
+			printer_line = &vdp.screen_output[1][y * VIDEO_DISPLAY_WIDTH];
+			break;
+		}
 		// Capture blended output as raw RGB555.
 		for (int x = 0; x < VIDEO_DISPLAY_WIDTH; x++)
 		{
-			write_capture_rgb555(x, vdp.display_output[y * VIDEO_DISPLAY_WIDTH + x]);
+			uint16_t c = vdp.display_output[y * VIDEO_OUTPUT_WIDTH + x];
+			write_capture_rgb555(x, c);
 		}
-		printer_line = &vdp.display_output[y * VIDEO_DISPLAY_WIDTH];
+		/* Display row is stride VIDEO_OUTPUT_WIDTH; first 256 are active for
+		   256 modes, contiguous from row start, so pass row pointer. */
+		printer_line = &vdp.display_output[y * VIDEO_OUTPUT_WIDTH];
 		break;
 	case 0x01:
 		// Capture screen A as raw RGB555.
@@ -834,12 +818,7 @@ static void display_capture(int y)
 
 void video_renderer_draw_scanline(int y)
 {
-	if (y == 0)
-	{
-		fill_224_mode_vertical_borders();
-	}
-
-	//Set both screens to the backdrop color
+	//Set both screens A and B to transparent (backdrop shows through).
 	memset(vdp.screens, 0, sizeof(vdp.screens));
 
 	for (int i = 0; i < 4; i++)
@@ -872,7 +851,7 @@ void video_renderer_draw_scanline(int y)
 		draw_single_screen(y, 0);
 		break;
 	case 0x03:
-		draw_hires_approx(y);
+		draw_blend_hires_interleave(y);
 		break;
 	case 0x04:
 		draw_screen_overlay(y, true);
