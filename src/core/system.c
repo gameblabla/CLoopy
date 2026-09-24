@@ -55,6 +55,7 @@ uint16_t *system_get_display_output(void) { return video_get_display_output(); }
 #include "core/sh7021/peripherals/sh7021_bsc.h"
 #include "core/sh7021/peripherals/sh7021_dmac.h"
 #include "core/sh7021/peripherals/sh7021_intc.h"
+#include "core/sh7021/peripherals/sh7021_pfc.h"
 #include "core/sh7021/peripherals/sh7021_ocpm.h"
 #include "core/sh7021/peripherals/sh7021_timers.h"
 #include <stdio.h>
@@ -80,6 +81,7 @@ static const StateChunkDef state_chunks[] = {
     {{'D','M','A','C'}, sh7021_ocpm_dmac_state_blob_size, sh7021_ocpm_dmac_get_state_blob, sh7021_ocpm_dmac_set_state_blob},
     {{'B','S','C',' '}, sh7021_ocpm_bsc_state_blob_size, sh7021_ocpm_bsc_get_state_blob, sh7021_ocpm_bsc_set_state_blob},
     {{'I','N','T','C'}, sh7021_ocpm_intc_state_blob_size, sh7021_ocpm_intc_get_state_blob, sh7021_ocpm_intc_set_state_blob},
+    {{'P','F','C',' '}, sh7021_ocpm_pfc_state_blob_size, sh7021_ocpm_pfc_get_state_blob, sh7021_ocpm_pfc_set_state_blob},
     {{'S','E','R','L'}, sh7021_ocpm_serial_state_blob_size, sh7021_ocpm_serial_get_state_blob, sh7021_ocpm_serial_set_state_blob},
     {{'T','M','R','S'}, sh7021_ocpm_timer_state_blob_size, sh7021_ocpm_timer_get_state_blob, sh7021_ocpm_timer_set_state_blob},
     {{'L','I','O',' '}, loopy_io_state_blob_size, loopy_io_get_state_blob, loopy_io_set_state_blob},

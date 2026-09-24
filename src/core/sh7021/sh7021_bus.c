@@ -78,6 +78,63 @@ static uint32_t translate_addr(uint32_t addr) {
 
 static int last_dram_row = -1;
 static int64_t next_dram_refresh_cycle = 0;
+static int refresh_phase_initialized = 0;
+static int64_t refresh_busy_until = 0;
+
+static void sync_refresh_to_now(void) {
+    if (!sh7021_bsc_refresh_enabled()) return;
+    int period = sh7021_bsc_refresh_period_cycles();
+    if (period <= 0) return;
+    int refresh_states = 3 + sh7021_bsc_refresh_wait_states();
+    int64_t now = timing_get_timestamp(TIMING_CPU_TIMER);
+    if (!refresh_phase_initialized) {
+        next_dram_refresh_cycle = now + period;
+        refresh_phase_initialized = 1;
+    }
+
+    /* A CBR refresh always raises RAS, including in RAS-down mode.  Advance
+       refresh requests that happened since the previous external-bus access
+       before deciding whether a DRAM access can use high-speed page mode. */
+    while (next_dram_refresh_cycle < now) {
+        int64_t end = next_dram_refresh_cycle + refresh_states;
+        if (end > refresh_busy_until) refresh_busy_until = end;
+        last_dram_row = -1;
+        next_dram_refresh_cycle += period;
+    }
+}
+
+static int apply_refresh_collision(uint32_t raw_addr, int bus_states) {
+    if (!sh7021_bsc_refresh_enabled() || bus_states <= 0) return 0;
+    int period = sh7021_bsc_refresh_period_cycles();
+    if (period <= 0) return 0;
+    int refresh_states = 3 + sh7021_bsc_refresh_wait_states();
+    sync_refresh_to_now();
+    int64_t now = timing_get_timestamp(TIMING_CPU_TIMER);
+
+    int extra = 0;
+    int64_t start = now;
+    if (refresh_busy_until > start) {
+        extra += (int)(refresh_busy_until - start);
+        start = refresh_busy_until;
+    }
+
+    int64_t end = start + bus_states;
+    if (next_dram_refresh_cycle < end) {
+        /* A CBR request that arrives during an external bus transfer waits for
+           that transfer, then owns the BSC bus for the complete refresh cycle.
+           No cartridge or DRAM access can overlap it. */
+        refresh_busy_until = end + refresh_states;
+        extra += refresh_states;
+        last_dram_row = -1;
+        next_dram_refresh_cycle += period;
+    }
+
+    if (extra > 0) {
+        prof.dram_refresh_stalls++;
+        prof_note_wait(raw_addr, extra);
+    }
+    return extra;
+}
 
 /* The interpreter already spends one CPU cycle per executed opcode.  The Loopy
  * memory timing table gives total bus-cycle lengths for target areas, not
@@ -99,37 +156,64 @@ static void apply_vdp_wait(uint32_t raw_addr, uint32_t translated_addr, int byte
     }
 }
 
-static void apply_workram_wait(uint32_t raw_addr, int bytes) {
+static int dram_row_shift(void) {
+    uint16_t dcr = sh7021_bsc_dcr();
+    switch ((dcr >> 8) & 3u) {
+    case 0: return 8;
+    case 1: return 9;
+    case 2: return 10;
+    default: return 8; /* MXC=3 is reserved; use reset comparison range. */
+    }
+}
+
+static void apply_workram_wait(uint32_t raw_addr, int bytes, int write) {
     if ((raw_addr & 0x0F000000u) != 0x09000000u) return;
-    int total_cycles = 0;
-    int transfers = 0;
+
+    /* Refresh can have ended the previously open row while the CPU was
+       executing from cartridge/BIOS space.  Resolve that before BE's row
+       comparison for this access. */
+    sync_refresh_to_now();
+
+    uint16_t dcr = sh7021_bsc_dcr();
+    int page_mode = (dcr & 0x1000u) != 0; /* BE */
+    int shift = dram_row_shift();
     uint32_t first = raw_addr & ~1u;
     uint32_t end = raw_addr + (uint32_t)bytes;
+    int first_row = (int)((first & 0x0007FFFFu) >> shift);
+    int continuation = page_mode && first_row == last_dram_row;
+
+    int total_cycles = 0;
+    int transfers = 0;
+
+    /* In short-pitch high-speed page mode a continuing word write has one
+       silent/open state before its column cycle.  Longword accesses are split
+       into two bus-width transfers below and are accounted by their extended
+       MA timing rather than by adding this word-access bubble a second time. */
+    if (write && bytes <= 2 && continuation && !(sh7021_bsc_wcr1() & 0x0002u))
+        total_cycles += 1;
+
     for (uint32_t a = first; a < end; a += 2u) {
-        int row = (int)((a & 0x0007FFFFu) >> 10); /* HM514260 row: 512 words / 1024 bytes. */
-        total_cycles += (row == last_dram_row) ? 1 : 3;
+        int row = (int)((a & 0x0007FFFFu) >> shift);
+        int burst = page_mode && row == last_dram_row;
+        /* Loopy's boot WCR1 selects short-pitch CPU DRAM reads/writes.  Keep
+           the long-pitch form correct as well: a burst column is two states. */
+        int long_pitch = write ? ((sh7021_bsc_wcr1() & 0x0002u) != 0)
+                               : ((sh7021_bsc_wcr1() & 0x0200u) != 0);
+        total_cycles += burst ? (long_pitch ? 2 : 1) : 3;
         transfers++;
         last_dram_row = row;
     }
 
     int cycles = extra_cycles_for_transfers(total_cycles, transfers);
-
-    /* Keep refresh accounting visible, but do not currently stall on it.  The
-     * notes confirm a ~244-cycle refresh cadence, but explicitly leave the
-     * collision length unknown.  Charging a guessed stall made real workloads
-     * too slow, so this remains a diagnostic counter until measured. */
-    int64_t now = timing_get_timestamp(TIMING_CPU_TIMER);
-    if (next_dram_refresh_cycle <= 0 || next_dram_refresh_cycle < now - 244) {
-        next_dram_refresh_cycle = now + 244;
-    }
-    if (cycles > 0) {
-        int64_t after = now + cycles;
-        while (next_dram_refresh_cycle <= after) {
-            prof.dram_refresh_stalls++;
-            next_dram_refresh_cycle += 244;
-        }
-    }
-
+    /* SH-1 instruction fetch (IF) and data-memory access (MA) share the
+       external bus.  For a cart-resident word store into DRAM, the MA slot
+       cannot overlap the next cartridge IF slot, so the pipeline splits by one
+       state beyond the wait-state charge above.  Load-use bubbles are modeled
+       separately in sh7021.c. */
+    if (write && bytes == 2 &&
+        (sh7021.current_opcode_pc & 0x0F000000u) == 0x0E000000u)
+        cycles += 1;
+    cycles += apply_refresh_collision(raw_addr, total_cycles);
     sh7021.cycles_left -= cycles;
     prof_note_wait(raw_addr, cycles);
 }
@@ -183,6 +267,11 @@ static void apply_cart_wait(uint32_t raw_addr, int bytes, int write) {
         total_cycles = transfers * 3;
     }
     int cycles = extra_cycles_for_transfers(total_cycles, transfers);
+    /* CBR refresh is a BSC bus cycle.  It cannot run in parallel with a
+       cartridge access on the same external bus; a pending refresh therefore
+       delays both ROM reads/fetches and SRAM transfers until the refresh cycle
+       has completed. */
+    if (total_cycles > 0) cycles += apply_refresh_collision(raw_addr, total_cycles);
     if (cycles > 0) {
         sh7021.cycles_left -= cycles;
         prof_note_wait(raw_addr, cycles);
@@ -250,6 +339,15 @@ void unmapped_write32(uint32_t addr, uint32_t value) { LOOPY_DEBUG_PRINTF("[SH70
 static uint32_t last_opcode_fetch_addr = 0xFFFFFFFFu;
 static int last_opcode_fetch_valid = 0;
 
+void sh7021_bus_timing_reset(void) {
+    last_dram_row = -1;
+    next_dram_refresh_cycle = 0;
+    refresh_phase_initialized = 0;
+    refresh_busy_until = 0;
+    last_opcode_fetch_valid = 0;
+    last_opcode_fetch_addr = 0xFFFFFFFFu;
+}
+
 void sh7021_bus_fetch_reset(void) {
     last_opcode_fetch_valid = 0;
     last_opcode_fetch_addr = 0xFFFFFFFFu;
@@ -258,17 +356,15 @@ void sh7021_bus_fetch_reset(void) {
 uint16_t sh7021_bus_fetch16(uint32_t addr) {
     uint32_t raw_addr = addr;
     uint32_t translated = translate_addr(addr);
-    /* SH instruction fetch is pipelined.  Sequential 16-bit opcode fetches from
-       cartridge ROM should not be charged like independent data reads; the
-       external bus latency is mostly hidden by the normal instruction stream.
-       Charge non-sequential/cart-entry fetches, but let linear execution run at
-       interpreter instruction timing.  Data reads still use sh7021_bus_read16(). */
-    int sequential = last_opcode_fetch_valid && raw_addr == (last_opcode_fetch_addr + 2u);
+    /* Cartridge ROM is a 16-bit external bus target.  Hardware timing tests
+       show that sequential opcode fetches pay the cartridge read time too; the
+       SH-1 prefetch pipeline does not hide these external wait states.  Apply
+       the cart access timing to every opcode fetch, just as for data reads. */
     uint8_t *mem = sh7021.pagetable[translated >> 12];
     if (mem) {
         prof_note_access(raw_addr, 2, 2);
-        apply_workram_wait(raw_addr, 2);
-        if (!sequential) apply_cart_wait(raw_addr, 2, 0);
+        apply_workram_wait(raw_addr, 2, 0);
+        apply_cart_wait(raw_addr, 2, 0);
         uint16_t value; memcpy(&value, mem + (translated & 0xFFFu), 2);
         last_opcode_fetch_addr = raw_addr;
         last_opcode_fetch_valid = 1;
@@ -285,7 +381,7 @@ uint8_t sh7021_bus_read8(uint32_t addr) {
     addr = translate_addr(addr);
     if (video_bus_is_vdp_addr(raw_addr, addr)) { idle_note_read(addr, 1); apply_vdp_wait(raw_addr, addr, 1, 0); return video_bus_read8(raw_addr); }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
-    if (mem) { apply_workram_wait(raw_addr, 1); apply_cart_wait(raw_addr, 1, 0); return mem[addr & 0xFFFu]; }
+    if (mem) { apply_workram_wait(raw_addr, 1, 0); apply_cart_wait(raw_addr, 1, 0); return mem[addr & 0xFFFu]; }
     idle_note_read(addr, 1);
     apply_vdp_mmio_wait(raw_addr, addr, 1, 0);
     apply_internal_peripheral_wait(raw_addr, 1);
@@ -297,7 +393,7 @@ uint16_t sh7021_bus_read16(uint32_t addr) {
     addr = translate_addr(addr);
     if (video_bus_is_vdp_addr(raw_addr, addr)) { idle_note_read(addr, 2); apply_vdp_wait(raw_addr, addr, 2, 0); return video_bus_read16(raw_addr); }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
-    if (mem) { apply_workram_wait(raw_addr, 2); apply_cart_wait(raw_addr, 2, 0); uint16_t value; memcpy(&value, mem + (addr & 0xFFFu), 2); return common_bswp16(value); }
+    if (mem) { apply_workram_wait(raw_addr, 2, 0); apply_cart_wait(raw_addr, 2, 0); uint16_t value; memcpy(&value, mem + (addr & 0xFFFu), 2); return common_bswp16(value); }
     idle_note_read(addr, 2);
     apply_vdp_mmio_wait(raw_addr, addr, 2, 0);
     apply_internal_peripheral_wait(raw_addr, 2);
@@ -309,7 +405,7 @@ uint32_t sh7021_bus_read32(uint32_t addr) {
     addr = translate_addr(addr);
     if (video_bus_is_vdp_addr(raw_addr, addr)) { idle_note_read(addr, 4); apply_vdp_wait(raw_addr, addr, 4, 0); return video_bus_read32(raw_addr); }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
-    if (mem) { apply_workram_wait(raw_addr, 4); apply_cart_wait(raw_addr, 4, 0); uint32_t value; memcpy(&value, mem + (addr & 0xFFFu), 4); return common_bswp32(value); }
+    if (mem) { apply_workram_wait(raw_addr, 4, 0); apply_cart_wait(raw_addr, 4, 0); uint32_t value; memcpy(&value, mem + (addr & 0xFFFu), 4); return common_bswp32(value); }
     idle_note_read(addr, 4);
     apply_vdp_mmio_wait(raw_addr, addr, 4, 0);
     apply_internal_peripheral_wait(raw_addr, 4);
@@ -322,7 +418,7 @@ void sh7021_bus_write8(uint32_t addr, uint8_t value) {
     addr = translate_addr(addr);
     if (video_bus_is_vdp_addr(raw_addr, addr)) { apply_vdp_wait(raw_addr, addr, 1, 1); video_bus_write8(raw_addr, value); return; }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
-    if (mem) { apply_workram_wait(raw_addr, 1); apply_cart_wait(raw_addr, 1, 1); mem[addr & 0xFFFu] = value; return; }
+    if (mem) { apply_workram_wait(raw_addr, 1, 1); apply_cart_wait(raw_addr, 1, 1); mem[addr & 0xFFFu] = value; return; }
     apply_vdp_mmio_wait(raw_addr, addr, 1, 1);
     apply_internal_peripheral_wait(raw_addr, 1);
     MMIO_ACCESS(write8, addr, value);
@@ -334,7 +430,7 @@ void sh7021_bus_write16(uint32_t addr, uint16_t value) {
     addr = translate_addr(addr);
     if (video_bus_is_vdp_addr(raw_addr, addr)) { apply_vdp_wait(raw_addr, addr, 2, 1); video_bus_write16(raw_addr, value); return; }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
-    if (mem) { apply_workram_wait(raw_addr, 2); apply_cart_wait(raw_addr, 2, 1); value = common_bswp16(value); memcpy(mem + (addr & 0xFFFu), &value, 2); return; }
+    if (mem) { apply_workram_wait(raw_addr, 2, 1); apply_cart_wait(raw_addr, 2, 1); value = common_bswp16(value); memcpy(mem + (addr & 0xFFFu), &value, 2); return; }
     apply_vdp_mmio_wait(raw_addr, addr, 2, 1);
     apply_internal_peripheral_wait(raw_addr, 2);
     MMIO_ACCESS(write16, addr, value);
@@ -346,7 +442,7 @@ void sh7021_bus_write32(uint32_t addr, uint32_t value) {
     addr = translate_addr(addr);
     if (video_bus_is_vdp_addr(raw_addr, addr)) { apply_vdp_wait(raw_addr, addr, 4, 1); video_bus_write32(raw_addr, value); return; }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
-    if (mem) { apply_workram_wait(raw_addr, 4); apply_cart_wait(raw_addr, 4, 1); value = common_bswp32(value); memcpy(mem + (addr & 0xFFFu), &value, 4); return; }
+    if (mem) { apply_workram_wait(raw_addr, 4, 1); apply_cart_wait(raw_addr, 4, 1); value = common_bswp32(value); memcpy(mem + (addr & 0xFFFu), &value, 4); return; }
     apply_vdp_mmio_wait(raw_addr, addr, 4, 1);
     apply_internal_peripheral_wait(raw_addr, 4);
     MMIO_ACCESS(write32, addr, value);

@@ -14,6 +14,7 @@ static int exception_seen = 0;
 
 uint8_t sh7021_bus_read8(uint32_t addr) { (void)addr; return (uint8_t)fake_read16; }
 uint16_t sh7021_bus_read16(uint32_t addr) { (void)addr; return fake_read16; }
+uint16_t sh7021_bus_fetch16(uint32_t addr) { return sh7021_bus_read16(addr); }
 uint32_t sh7021_bus_read32(uint32_t addr) { (void)addr; return fake_read32; }
 void sh7021_bus_write8(uint32_t addr, uint8_t data) { (void)addr; (void)data; }
 void sh7021_bus_write16(uint32_t addr, uint16_t data) { (void)addr; (void)data; }

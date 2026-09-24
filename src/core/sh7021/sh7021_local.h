@@ -14,6 +14,11 @@ typedef struct SH7021CPU {
     uint32_t current_opcode_pc;
     uint8_t in_delay_slot;
     uint8_t sleep_mode;
+    /* SH-1 load-use interlock state.  These two bytes intentionally occupy
+       the padding that used to precede cycles_left, so the raw CPU-state blob
+       size remains unchanged. */
+    uint8_t load_delay_reg;
+    uint8_t load_delay_valid;
     int32_t cycles_left;
     int pending_irq_prio;
     int pending_irq_vector;

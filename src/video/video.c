@@ -60,13 +60,13 @@ static int hcmp_to_line_cycles(uint16_t hcmp)
 {
     int signed_h = (hcmp & 0x100) ? ((int)(hcmp & 0x1FF) - 0x200) : (int)(hcmp & 0x1FF);
     int vdp_clocks;
-    if (signed_h >= 0) {
-        if (signed_h > 257) return -1;
-        vdp_clocks = signed_h * 4;
-    } else {
-        if (signed_h < -84 || signed_h > -1) return -1;
-        vdp_clocks = (int)VDP_NTSC_HACTIVE_CLOCKS + ((signed_h + 84) * 4);
-    }
+
+    /* The hardware counter runs -84..-1 through horizontal blank, then
+       0..257 through the active part of the scanline.  Treat -84 as the
+       scanline origin so the comparator and HCOUNT agree with the numbering
+       documented by the VDP tests. */
+    if (signed_h < -84 || signed_h > 257) return -1;
+    vdp_clocks = (signed_h + 84) * 4;
     int cycles = vdp_clocks_to_cpu_cycles(vdp_clocks);
     int line_cycles = cpu_cycles_per_ntsc_line();
     if (cycles < 0 || cycles >= line_cycles) return -1;
@@ -78,8 +78,7 @@ static void fire_irq0(uint64_t param, int cycles_late)
     (void)param;
     (void)cycles_late;
     if (irq0_line_matches()) {
-        sh7021_ocpm_intc_assert_irq(IRQ_IRQ0, 0);
-        sh7021_ocpm_intc_deassert_irq(IRQ_IRQ0);
+        sh7021_ocpm_intc_pulse_irq(IRQ_IRQ0, 0);
     }
 }
 
@@ -88,8 +87,7 @@ static void fire_irq2(uint64_t param, int cycles_late)
     (void)param;
     (void)cycles_late;
     if (vdp.irq2_enable_a && vdp.irq2_enable_b && vdp.irq2_enable_c) {
-        sh7021_ocpm_intc_assert_irq(IRQ_IRQ2, 0);
-        sh7021_ocpm_intc_deassert_irq(IRQ_IRQ2);
+        sh7021_ocpm_intc_pulse_irq(IRQ_IRQ2, 0);
     }
 }
 
@@ -158,17 +156,28 @@ static void dump_bmp(const char *name, uint16_t *data)
     fclose(bmp_file);
 }
 
+static int irq1_vsync_is_active(void)
+{
+    /* During vertical blank the VDP represents scanlines -39..-1 as
+       0x1D9..0x1FF, so the wrapped counter is above the visible range. */
+    return vdp.vcount >= vdp.visible_scanlines;
+}
+
+static void update_irq1_vsync_line(void)
+{
+    int asserted = vdp.sync_irq_ctrl.irq1_enable &&
+                   vdp.sync_irq_ctrl.irq1_source == 0 &&
+                   irq1_vsync_is_active();
+    sh7021_ocpm_intc_set_irq1_line(asserted);
+}
+
 static void start_hsync(uint64_t param, int cycles_late)
 {
-	//IRQ1 is triggered on visible lines when in HSYNC mode
-	if (vdp.sync_irq_ctrl.irq1_enable && vdp.sync_irq_ctrl.irq1_source == 1)
+	//IRQ1 is held active through HBlank on visible lines when in HSYNC mode.
+	if (vdp.sync_irq_ctrl.irq1_enable && vdp.sync_irq_ctrl.irq1_source == 1 &&
+	    vdp.vcount < vdp.visible_scanlines)
 	{
-		if(vdp.vcount < vdp.visible_scanlines)
-		{
-			IRQ irq_id = IRQ_IRQ1;
-			sh7021_ocpm_intc_assert_irq(irq_id, 0);
-			sh7021_ocpm_intc_deassert_irq(irq_id);
-		}
+		sh7021_ocpm_intc_set_irq1_line(1);
 	}
 }
 
@@ -185,18 +194,11 @@ static void vsync_start()
 	if (vdp.cmp_irq_ctrl.nmi_enable)
 	{
 		//TODO: is there a cleaner way to do this?
-		IRQ irq_id = IRQ_NMI;
-		sh7021_ocpm_intc_assert_irq(irq_id, 0);
-		sh7021_ocpm_intc_deassert_irq(irq_id);
+		sh7021_ocpm_intc_pulse_irq(IRQ_NMI, 0);
 	}
 
-	//IRQ1 is triggered on VSYNC when in VSYNC mode
-	if (vdp.sync_irq_ctrl.irq1_enable && (vdp.sync_irq_ctrl.irq1_source == 0))
-	{
-		IRQ irq_id = IRQ_IRQ1;
-		sh7021_ocpm_intc_assert_irq(irq_id, 0);
-		sh7021_ocpm_intc_deassert_irq(irq_id);
-	}
+	//IRQ1 is an active-low level for the full VSYNC/VBlank interval.
+	update_irq1_vsync_line();
 
 	{
 		/* Printer is 256 wide, active area only. 256 display frames copy
@@ -230,6 +232,9 @@ static void vsync_start()
 
 static void inc_vcount(uint64_t param, int cycles_late)
 {
+    /* HSync mode drives IRQ1 low only for the horizontal blanking tail of the
+       previous line.  The next line boundary releases it. */
+    if (vdp.sync_irq_ctrl.irq1_source == 1) sh7021_ocpm_intc_set_irq1_line(0);
     vdp.line_start_timestamp = (uint64_t)timing_get_timestamp(TIMING_CPU_TIMER);
     loopy_io_matrix_scan_vcount(vdp.vcount);
 	if (vdp.vcount < vdp.visible_scanlines)
@@ -251,6 +256,7 @@ static void inc_vcount(uint64_t param, int cycles_late)
 	{
 		LOOPY_DEBUG_PRINTF("[Video] VSYNC end\n");
 		vdp.vcount = 0;
+		update_irq1_vsync_line();
 	}
 
     const int CYCLES_PER_LINE = cpu_cycles_per_ntsc_line();
@@ -448,16 +454,9 @@ static uint16_t video_current_hcount(void)
     if (elapsed_cpu >= line_cycles) elapsed_cpu %= line_cycles;
 
     int64_t vdp_clock = (elapsed_cpu * VDP_NTSC_LINE_CLOCKS) / line_cycles;
-    if (vdp_clock < 1028) {
-        return (uint16_t)((vdp_clock / 4) & 0x1FF);
-    }
-    if (vdp_clock == 1028) {
-        return 0x101;
-    }
-    int blank = (int)((vdp_clock - VDP_NTSC_HACTIVE_CLOCKS) / 4);
-    if (blank < 0) blank = 0;
-    if (blank > 83) blank = 83;
-    return (uint16_t)((0x1AC + blank) & 0x1FF);
+    int h = -84 + (int)(vdp_clock / 4);
+    if (h > 257) h = 257;
+    return (uint16_t)(h & 0x1FF);
 }
 
 static uint16_t vdp_unmapped_read16(uint32_t addr)
@@ -1087,6 +1086,8 @@ void video_ctrl_write16(uint32_t addr, uint16_t value)
 		LOOPY_DEBUG_PRINTF("[Video] write SYNC_IRQ_CTRL: %04X\n", value);
 		vdp.sync_irq_ctrl.irq1_enable = value & 0x1;
 		vdp.sync_irq_ctrl.irq1_source = (value >> 1) & 0x1;
+		if (vdp.sync_irq_ctrl.irq1_source == 0) update_irq1_vsync_line();
+		else sh7021_ocpm_intc_set_irq1_line(0);
 		break;
 	default:
 		LOOPY_DEBUG_PRINTF("[Video] unmapped write16 %04X: %04X\n", addr, value);
@@ -1704,6 +1705,8 @@ void video_set_state_blob(const void *src, uint32_t size) {
     vdp.bitmap_mem_ctrl = b->bitmap_mem_ctrl;
     vdp.dma_mask = b->dma_mask;
     vdp.dma_value = b->dma_value;
+    if (vdp.sync_irq_ctrl.irq1_source == 0) update_irq1_vsync_line();
+    else sh7021_ocpm_intc_set_irq1_line(0);
 }
 
 int video_debug_peek(uint32_t addr, int bytes, uint32_t *out_value)

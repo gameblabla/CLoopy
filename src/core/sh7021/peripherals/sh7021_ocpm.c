@@ -3,9 +3,9 @@
 #include "core/sh7021/peripherals/sh7021_bsc.h"
 #include "core/sh7021/peripherals/sh7021_dmac.h"
 #include "core/sh7021/peripherals/sh7021_intc.h"
+#include "core/sh7021/peripherals/sh7021_pfc.h"
 #include "core/sh7021/peripherals/sh7021_serial.h"
 #include "core/sh7021/peripherals/sh7021_timers.h"
-#include "sound/sound.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -21,7 +21,6 @@
 #define BSC_END 0xFB4u
 
 static uint8_t oram[0x400];
-static uint16_t portb_data = 0x0100u;
 
 uint8_t sh7021_ocpm_io_read8(uint32_t addr) {
     addr = (addr & 0x1FFu) + 0xE00u;
@@ -30,10 +29,7 @@ uint8_t sh7021_ocpm_io_read8(uint32_t addr) {
     if (addr >= DMAC_START && addr < DMAC_END) return sh7021_ocpm_dmac_read8(addr);
     if (addr >= INTC_START && addr < INTC_END) return sh7021_ocpm_intc_read8(addr);
     if (addr >= BSC_START && addr < BSC_END) return sh7021_ocpm_bsc_read8(addr);
-    if (addr == 0xFC2u || addr == 0xFC3u) {
-        uint16_t v = sound_cart_portb_read(portb_data);
-        return (addr & 1u) ? (uint8_t)v : (uint8_t)(v >> 8);
-    }
+    if (sh7021_ocpm_pfc_handles(addr)) return sh7021_ocpm_pfc_read8(addr);
     LOOPY_DEBUG_PRINTF("[OCPM] read8 %08X\n", addr);
     return 0;
 }
@@ -44,7 +40,7 @@ uint16_t sh7021_ocpm_io_read16(uint32_t addr) {
     if (addr >= DMAC_START && addr < DMAC_END) return sh7021_ocpm_dmac_read16(addr);
     if (addr >= INTC_START && addr < INTC_END) return sh7021_ocpm_intc_read16(addr);
     if (addr >= BSC_START && addr < BSC_END) return sh7021_ocpm_bsc_read16(addr);
-    if (addr == 0xFC2u) return sound_cart_portb_read(portb_data);
+    if (sh7021_ocpm_pfc_handles(addr)) return sh7021_ocpm_pfc_read16(addr);
     LOOPY_DEBUG_PRINTF("[OCPM] read16 %08X\n", addr);
     return 0;
 }
@@ -64,13 +60,7 @@ void sh7021_ocpm_io_write8(uint32_t addr, uint8_t value) {
     if (addr >= DMAC_START && addr < DMAC_END) { sh7021_ocpm_dmac_write8(addr, value); return; }
     if (addr >= INTC_START && addr < INTC_END) { sh7021_ocpm_intc_write8(addr, value); return; }
     if (addr >= BSC_START && addr < BSC_END) { sh7021_ocpm_bsc_write8(addr, value); return; }
-    if (addr == 0xFC2u || addr == 0xFC3u) {
-        uint16_t old = portb_data;
-        if (addr & 1u) portb_data = (uint16_t)((portb_data & 0xFF00u) | value);
-        else portb_data = (uint16_t)(((uint16_t)value << 8) | (portb_data & 0x00FFu));
-        sound_cart_portb_write(old, portb_data);
-        return;
-    }
+    if (sh7021_ocpm_pfc_handles(addr)) { sh7021_ocpm_pfc_write8(addr, value); return; }
     LOOPY_DEBUG_PRINTF("[OCPM] write8 %08X: %02X\n", addr, value);
 }
 
@@ -80,12 +70,7 @@ void sh7021_ocpm_io_write16(uint32_t addr, uint16_t value) {
     if (addr >= DMAC_START && addr < DMAC_END) { sh7021_ocpm_dmac_write16(addr, value); return; }
     if (addr >= INTC_START && addr < INTC_END) { sh7021_ocpm_intc_write16(addr, value); return; }
     if (addr >= BSC_START && addr < BSC_END) { sh7021_ocpm_bsc_write16(addr, value); return; }
-    if (addr == 0xFC2u) {
-        uint16_t old = portb_data;
-        portb_data = value;
-        sound_cart_portb_write(old, portb_data);
-        return;
-    }
+    if (sh7021_ocpm_pfc_handles(addr)) { sh7021_ocpm_pfc_write16(addr, value); return; }
     LOOPY_DEBUG_PRINTF("[OCPM] write16 %08X: %04X\n", addr, value);
 }
 

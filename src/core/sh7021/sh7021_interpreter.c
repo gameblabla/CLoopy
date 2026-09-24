@@ -170,7 +170,14 @@ static void BF(uint32_t d)
 	if ((sh7021.sr & SH_T) == 0)
 	{
 		int32_t disp = sh7021_mame_sext(d, 8);
+		uint32_t sequential_pc = sh7021.pc;
 		sh7021.pc = sh7021.ea = sh7021.pc + disp * 2 + 2;
+		/* SH-1 performs two sequential overrun instruction fetches before the
+		   destination fetch of a taken BT/BF.  The three-cycle minimum branch
+		   timing already includes their one-state baseline; perform the discarded
+		   reads here so external wait states and refresh contention are charged. */
+		(void)sh7021_bus_fetch16(sequential_pc);
+		(void)sh7021_bus_fetch16(sequential_pc + 2u);
 		sh7021.cycles_left -= 2;
 	}
 }
@@ -255,7 +262,14 @@ static void BT(uint32_t d)
 	if ((sh7021.sr & SH_T) != 0)
 	{
 		int32_t disp = sh7021_mame_sext(d, 8);
+		uint32_t sequential_pc = sh7021.pc;
 		sh7021.pc = sh7021.ea = sh7021.pc + disp * 2 + 2;
+		/* SH-1 performs two sequential overrun instruction fetches before the
+		   destination fetch of a taken BT/BF.  The three-cycle minimum branch
+		   timing already includes their one-state baseline; perform the discarded
+		   reads here so external wait states and refresh contention are charged. */
+		(void)sh7021_bus_fetch16(sequential_pc);
+		(void)sh7021_bus_fetch16(sequential_pc + 2u);
 		sh7021.cycles_left -= 2;
 	}
 }
@@ -1894,6 +1908,12 @@ static void RTE(void) {
     sh7021.sr = sh7021_bus_read32(sh7021.ea) & SH_FLAGS;
     sh7021.gpr[15] += 4;
     sh7021.cycles_left -= 3;
+    /* External level requests are not re-sampled until execution has resumed
+       after RTE.  The delay slot is executed by the current run-loop
+       iteration, and this one-boundary inhibit lets the restored stream make
+       one instruction of forward progress before a still-active IRQ can be
+       accepted again. */
+    sh7021_block_irq_next();
 }
 
 static void TRAPA(uint32_t i) {

@@ -5,6 +5,7 @@
 #include "core/sh7021/peripherals/sh7021_bsc.h"
 #include "core/sh7021/peripherals/sh7021_dmac.h"
 #include "core/sh7021/peripherals/sh7021_intc.h"
+#include "core/sh7021/peripherals/sh7021_pfc.h"
 #include "core/sh7021/peripherals/sh7021_serial.h"
 #include "core/sh7021/peripherals/sh7021_timers.h"
 #include "core/loopy_debug.h"
@@ -396,8 +397,11 @@ void sh7021_initialize(void) {
     irq_ev = timing_invalid_event_handle();
     (void)irq_ev;
     sh7021_ocpm_bsc_initialize();
+    sh7021_ocpm_bsc_apply_loopy_boot_state();
+    sh7021_bus_timing_reset();
     sh7021_ocpm_dmac_initialize();
     sh7021_ocpm_intc_initialize();
+    sh7021_ocpm_pfc_initialize();
     sh7021_ocpm_serial_initialize();
     sh7021_ocpm_timer_initialize();
 }
@@ -434,6 +438,138 @@ static int idle_snapshot_matches(const uint32_t *snap) {
 /* Only loops this short are considered.  The known wait loops span a handful of
    bytes; the bound keeps the detector off the back edge of ordinary long loops. */
 #define IDLE_MAX_SPAN 64u
+
+/* SH-1 has a one-cycle interlock when an instruction immediately following a
+   memory load reads the loaded general register.  The instruction table lists
+   minimum execution times; this dependency bubble is additional.  Keep the
+   dependency at the instruction boundary rather than baking it into MOV load
+   timings, because an independent instruction after the same load does not
+   stall. */
+static uint16_t sh7021_gpr_read_mask(uint16_t opcode) {
+    uint32_t n = (opcode >> 8) & 15u;
+    uint32_t m = (opcode >> 4) & 15u;
+    uint16_t rn = (uint16_t)(1u << n);
+    uint16_t rm = (uint16_t)(1u << m);
+
+    switch (opcode >> 12) {
+    case 0x0: {
+        switch (opcode & 0x3fu) {
+        case 0x04: case 0x05: case 0x06:
+        case 0x14: case 0x15: case 0x16:
+        case 0x24: case 0x25: case 0x26:
+        case 0x34: case 0x35: case 0x36:
+            return (uint16_t)(rm | rn | 1u); /* Rm,@(R0,Rn) */
+        case 0x0c: case 0x0d: case 0x0e:
+        case 0x1c: case 0x1d: case 0x1e:
+        case 0x2c: case 0x2d: case 0x2e:
+        case 0x3c: case 0x3d: case 0x3e:
+            return (uint16_t)(rm | 1u);      /* @(R0,Rm),Rn */
+        case 0x0b: return 0;                 /* RTS */
+        case 0x2b: return (uint16_t)(1u << 15); /* RTE stack */
+        default: return 0;
+        }
+    }
+    case 0x1: return (uint16_t)(rm | rn);    /* MOV.L Rm,@(disp,Rn) */
+    case 0x2: return (uint16_t)(rm | rn);    /* stores / two-register ALU */
+    case 0x3: return (uint16_t)(rm | rn);    /* two-register ALU */
+    case 0x4: {
+        switch (opcode & 0x3fu) {
+        case 0x02: case 0x03: case 0x06: case 0x07:
+        case 0x0a: case 0x0b: case 0x0e:
+        case 0x12: case 0x13: case 0x16: case 0x17:
+        case 0x1a: case 0x1b: case 0x1e:
+        case 0x22: case 0x23: case 0x26: case 0x27:
+        case 0x2a: case 0x2b: case 0x2e:
+            return rn;
+        case 0x0f: case 0x1f: case 0x2f: case 0x3f:
+            return (uint16_t)(rm | rn);      /* MAC.W @Rm+,@Rn+ */
+        default:
+            /* SHLL/SHLR/ROT/CMP instructions operate in place on Rn. */
+            if ((opcode & 0x0fu) == 0x0u || (opcode & 0x0fu) == 0x1u ||
+                (opcode & 0x0fu) == 0x4u || (opcode & 0x0fu) == 0x5u ||
+                (opcode & 0x3fu) == 0x11u || (opcode & 0x3fu) == 0x15u ||
+                (opcode & 0x3fu) == 0x20u || (opcode & 0x3fu) == 0x21u ||
+                (opcode & 0x3fu) == 0x24u || (opcode & 0x3fu) == 0x25u ||
+                (opcode & 0x3fu) == 0x28u || (opcode & 0x3fu) == 0x29u)
+                return rn;
+            return 0;
+        }
+    }
+    case 0x5: return rm;                     /* MOV.L @(disp,Rm),Rn */
+    case 0x6: return rm;                     /* load / MOV / unary Rm,Rn */
+    case 0x7: return rn;                     /* ADD #imm,Rn */
+    case 0x8:
+        switch ((opcode >> 8) & 15u) {
+        case 0: case 1: return (uint16_t)(rm | 1u); /* R0,@(disp,Rm) */
+        case 4: case 5: return rm;                    /* @(disp,Rm),R0 */
+        case 8: return 1u;                            /* CMP/EQ #imm,R0 */
+        default: return 0;                            /* branches */
+        }
+    case 0x9: return 0;                      /* PC-relative load */
+    case 0xa: case 0xb: return 0;             /* BRA / BSR */
+    case 0xc:
+        switch ((opcode >> 8) & 15u) {
+        case 0: case 1: case 2:              /* R0,@(disp,GBR) */
+        case 8: case 9: case 10: case 11:    /* immediate ALU R0 */
+        case 12: case 13: case 14: case 15:  /* @(R0,GBR) */
+            return 1u;
+        case 3: return (uint16_t)(1u << 15);  /* TRAPA stack */
+        default: return 0;
+        }
+    case 0xd: case 0xe: case 0xf: return 0;
+    default: return 0;
+    }
+}
+
+static int sh7021_loaded_gpr(uint16_t opcode) {
+    uint32_t n = (opcode >> 8) & 15u;
+    switch (opcode >> 12) {
+    case 0x0:
+        switch (opcode & 0x3fu) {
+        case 0x0c: case 0x0d: case 0x0e:
+        case 0x1c: case 0x1d: case 0x1e:
+        case 0x2c: case 0x2d: case 0x2e:
+        case 0x3c: case 0x3d: case 0x3e:
+            return (int)n;
+        default: return -1;
+        }
+    case 0x5: return (int)n;
+    case 0x6:
+        switch (opcode & 15u) {
+        case 0: case 1: case 2: case 4: case 5: case 6: return (int)n;
+        default: return -1;
+        }
+    case 0x8:
+        switch ((opcode >> 8) & 15u) {
+        case 4: case 5: return 0;
+        default: return -1;
+        }
+    case 0x9: return (int)n;
+    case 0xc:
+        switch ((opcode >> 8) & 15u) {
+        case 4: case 5: case 6: return 0;
+        default: return -1;
+        }
+    case 0xd: return (int)n;
+    default: return -1;
+    }
+}
+
+static void sh7021_run_one(uint16_t instr) {
+    if (sh7021.load_delay_valid) {
+        uint16_t reads = sh7021_gpr_read_mask(instr);
+        if (reads & (uint16_t)(1u << sh7021.load_delay_reg)) sh7021.cycles_left--;
+    }
+    sh7021.load_delay_valid = 0;
+
+    sh7021_interpreter_run(instr);
+
+    int loaded = sh7021_loaded_gpr(instr);
+    if (loaded >= 0) {
+        sh7021.load_delay_reg = (uint8_t)loaded;
+        sh7021.load_delay_valid = 1;
+    }
+}
 
 void sh7021_run(void) {
     /* The detector is rebuilt every timeslice.  This is what makes the skip
@@ -537,7 +673,7 @@ void sh7021_run(void) {
         sh7021.current_opcode_pc = fetch_pc;
         sh7021.in_delay_slot = 0;
         sh7021.pc = fetch_pc + 2;
-        sh7021_interpreter_run(instr);
+        sh7021_run_one(instr);
         sh7021.cycles_left--;
 
         if (sh7021.m_delay) {
@@ -548,7 +684,7 @@ void sh7021_run(void) {
             sh7021.current_opcode_pc = delay_pc;
             sh7021.in_delay_slot = 1;
             sh7021.pc = delay_pc + 2;
-            sh7021_interpreter_run(delay_instr);
+            sh7021_run_one(delay_instr);
             sh7021.in_delay_slot = 0;
             sh7021.cycles_left--;
             if (sh7021.m_delay) {
@@ -600,9 +736,16 @@ int sh7021_service_pending_irq(void) {
     if (prio < 0) prio = 0;
     if (prio > 15) prio = 15;
     sh7021_raise_exception(vector);
+    /* Account for the IRQ acceptance hand-off before handler execution.
+       Operand/vector memory states are charged separately by the bus model. */
+    sh7021.cycles_left--;
     sh7021.sr &= ~0xF0u;
     sh7021.sr |= (uint32_t)prio << 4;
     sh7021.pending_irq_prio = 0;
+    /* Tell INTC that the currently presented source was accepted.  Edge
+       requests are consumed here; asserted level sources are immediately
+       presented again and remain masked until RTE lowers SR.IMASK. */
+    sh7021_ocpm_intc_acknowledge();
     return 1;
 }
 

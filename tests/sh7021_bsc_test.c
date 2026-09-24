@@ -56,6 +56,20 @@ int main(void) {
     expect16("area 2 read WAIT sample bit", sh7021_bsc_area_wait_sample_read(2), 0x0001u);
     expect16("area02 long wait", sh7021_bsc_long_wait_area02(), 0x0001u);
 
+    /* CLoopy starts directly at cartridge startup, after the point where the
+       retail BIOS has configured the BSC.  Pin that post-BIOS image because
+       CPU/cart/DRAM timing depends on it. */
+    sh7021_ocpm_bsc_apply_loopy_boot_state();
+    expect16("Loopy BCR", sh7021_bsc_bcr(), 0x9000u);
+    expect16("Loopy WCR1", sh7021_bsc_wcr1(), 0xb9fdu);
+    expect16("Loopy WCR2", sh7021_bsc_wcr2(), 0xb9b9u);
+    expect16("Loopy WCR3", sh7021_bsc_wcr3(), 0xa800u);
+    expect16("Loopy DCR", sh7021_bsc_dcr(), 0x5d00u);
+    expect16("Loopy refresh enabled", sh7021_bsc_refresh_enabled(), 0x0001u);
+    expect16("Loopy RTCOR", sh7021_bsc_refresh_constant(), 0x007au);
+    expect16("Loopy refresh period", sh7021_bsc_refresh_period_cycles(), 244u);
+    expect16("Loopy area-6 long wait", sh7021_bsc_long_wait_area6(), 2u);
+
     puts("sh7021_bsc_test: OK");
     return 0;
 }
