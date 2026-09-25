@@ -34,7 +34,9 @@ void sh7021_ocpm_intc_initialize(void);
 uint8_t sh7021_ocpm_intc_read8(uint32_t addr);
 void sh7021_ocpm_intc_write8(uint32_t addr, uint8_t value);
 uint16_t sh7021_ocpm_intc_read16(uint32_t addr);
+uint32_t sh7021_ocpm_intc_read32(uint32_t addr);
 void sh7021_ocpm_intc_write16(uint32_t addr, uint16_t value);
+void sh7021_ocpm_intc_write32(uint32_t addr, uint32_t value);
 void sh7021_ocpm_intc_assert_irq(IRQ irq, int vector_offs);
 void sh7021_ocpm_intc_deassert_irq(IRQ irq);
 /* Latch a one-shot interrupt request.  This is used for hardware outputs that

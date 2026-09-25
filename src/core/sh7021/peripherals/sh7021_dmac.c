@@ -1,5 +1,6 @@
 #include "core/sh7021/peripherals/sh7021_dmac.h"
 #include "core/sh7021/peripherals/sh7021_intc.h"
+#include "core/sh7021/peripherals/sh7021_serial.h"
 #include "core/sh7021/sh7021_bus.h"
 #include <string.h>
 
@@ -103,6 +104,13 @@ static int channel_request_valid(Channel *chan) {
     return state.dreqs[chan->ctrl.mode];
 }
 
+static void channel_ack_peripheral_dreq(const Channel *chan) {
+    if (chan->ctrl.mode == DREQ_TXI0) sh7021_ocpm_serial_dma_tx_ack(0);
+    else if (chan->ctrl.mode == DREQ_TXI1) sh7021_ocpm_serial_dma_tx_ack(1);
+    else if (chan->ctrl.mode == DREQ_RXI0) sh7021_ocpm_serial_dma_rx_ack(0);
+    else if (chan->ctrl.mode == DREQ_RXI1) sh7021_ocpm_serial_dma_rx_ack(1);
+}
+
 static void channel_finish(Channel *chan) {
     int ch = channel_index(chan);
     chan->ctrl.finished = 1;
@@ -125,6 +133,7 @@ static void channel_start_transfer(Channel *chan) {
         while (chan->transfer_size && channel_request_valid(chan)) {
             uint16_t value = sh7021_bus_dma_read16(chan->src_addr, single);
             sh7021_bus_dma_write16(chan->dst_addr, value, single);
+            channel_ack_peripheral_dreq(chan);
             chan->src_addr += (uint32_t)src_step;
             chan->dst_addr += (uint32_t)dst_step;
             chan->transfer_size--;
@@ -134,6 +143,7 @@ static void channel_start_transfer(Channel *chan) {
         while (chan->transfer_size && channel_request_valid(chan)) {
             uint8_t value = sh7021_bus_dma_read8(chan->src_addr, single);
             sh7021_bus_dma_write8(chan->dst_addr, value, single);
+            channel_ack_peripheral_dreq(chan);
             chan->src_addr += (uint32_t)src_step;
             chan->dst_addr += (uint32_t)dst_step;
             chan->transfer_size--;

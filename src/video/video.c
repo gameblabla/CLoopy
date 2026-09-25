@@ -11,26 +11,29 @@
 #include "video/render.h"
 #include "video/vdp_local.h"
 #include "video/video.h"
+#include "video/video_timing.h"
 
-static TimingFuncHandle vcount_func, hsync_func, irq0_func, irq2_func;
-static TimingEventHandle vcount_ev, hsync_ev, irq0_ev;
+static TimingFuncHandle vcount_func, hsync_assert_func, hsync_release_func, irq0_func, irq2_func;
+static TimingEventHandle vcount_ev, hsync_assert_ev, hsync_release_ev, irq0_ev;
 static bool bmp_dump_enabled = true;
 
 VDP vdp;
 
 #define LINES_PER_FRAME 263
-#define VDP_NTSC_CLOCK 21477272LL
-#define VDP_NTSC_LINE_CLOCKS 1365LL
-#define VDP_NTSC_HACTIVE_CLOCKS 1029LL
 
 static int cpu_cycles_per_ntsc_line(void)
 {
-    return (int)((VDP_NTSC_LINE_CLOCKS * (int64_t)TIMING_F_CPU + (VDP_NTSC_CLOCK / 2)) / VDP_NTSC_CLOCK);
+    return video_timing_cpu_cycles_per_ntsc_line();
 }
 
-static int vdp_clocks_to_cpu_cycles(int vdp_clocks)
+static int cpu_cycles_for_scanline(uint16_t vcount)
 {
-    return (int)(((int64_t)vdp_clocks * (int64_t)TIMING_F_CPU + (VDP_NTSC_CLOCK / 2)) / VDP_NTSC_CLOCK);
+    /* 267,970 cycles per 263-line hardware frame while preserving a ~1019
+       cycle local scanline. */
+    uint16_t v = vcount & 0x1ffu;
+    if (v < 224u) return (v & 31u) == 0u ? 1020 : 1019;
+    if (v >= 0x1d9u) return v < (0x1d9u + 14u) ? 1018 : 1019;
+    return 1019;
 }
 
 static uint32_t translate_vdp_addr(uint32_t raw_addr)
@@ -59,18 +62,7 @@ static bool irq0_line_matches(void)
 static int hcmp_to_line_cycles(uint16_t hcmp)
 {
     int signed_h = (hcmp & 0x100) ? ((int)(hcmp & 0x1FF) - 0x200) : (int)(hcmp & 0x1FF);
-    int vdp_clocks;
-
-    /* The hardware counter runs -84..-1 through horizontal blank, then
-       0..257 through the active part of the scanline.  Treat -84 as the
-       scanline origin so the comparator and HCOUNT agree with the numbering
-       documented by the VDP tests. */
-    if (signed_h < -84 || signed_h > 257) return -1;
-    vdp_clocks = (signed_h + 84) * 4;
-    int cycles = vdp_clocks_to_cpu_cycles(vdp_clocks);
-    int line_cycles = cpu_cycles_per_ntsc_line();
-    if (cycles < 0 || cycles >= line_cycles) return -1;
-    return cycles;
+    return video_timing_hcount_to_cpu_cycles(signed_h);
 }
 
 static void fire_irq0(uint64_t param, int cycles_late)
@@ -96,6 +88,15 @@ static void schedule_irq0_for_line(int cycles_late)
     if (!irq0_line_matches()) return;
     int cycles = hcmp_to_line_cycles(vdp.irq0_hcmp);
     if (cycles < 0) return;
+    /* R2/R3 show a small phase-dependent VDP->CPU synchronizer delay: the
+       compare points at H=-80, 64 and 200 do not all land on the same CPU
+       phase.  Preserve that three-phase relationship instead of applying one
+       flat IRQ0 offset to every horizontal compare. */
+    cycles += 3 * ((cycles % 3) - 1);
+    /* IRQ0's external-pin presentation is one CPU state shorter than the
+       generic external request path. Positive-H compares land one state later
+       in the VDP synchronizer, which restores the measured 20/19-count delays. */
+    if (!(vdp.irq0_hcmp & 0x100u)) cycles += 2;
     cycles -= cycles_late;
     if (cycles < 1) cycles = 1;
     irq0_ev = timing_add_event(irq0_func, timing_convert_cpu(cycles), 0, TIMING_CPU_TIMER);
@@ -173,12 +174,25 @@ static void update_irq1_vsync_line(void)
 
 static void start_hsync(uint64_t param, int cycles_late)
 {
-	//IRQ1 is held active through HBlank on visible lines when in HSYNC mode.
-	if (vdp.sync_irq_ctrl.irq1_enable && vdp.sync_irq_ctrl.irq1_source == 1 &&
-	    vdp.vcount < vdp.visible_scanlines)
-	{
-		sh7021_ocpm_intc_set_irq1_line(1);
-	}
+    (void)cycles_late;
+    /* The raster-DMA line signal falls immediately before the VCOUNT step.
+       The first such edge after selecting line mode only arms the output latch;
+       the following edge is the first one presented on PA13. */
+    if (param && vdp.sync_irq_ctrl.irq1_source == 1) {
+        if (vdp.sync_irq_ctrl.irq1_enable == 2)
+            vdp.sync_irq_ctrl.irq1_enable = 1;
+        else if (vdp.sync_irq_ctrl.irq1_enable)
+            sh7021_ocpm_intc_set_irq1_line(1);
+    }
+}
+
+static void end_hsync(uint64_t param, int cycles_late)
+{
+    (void)param;
+    (void)cycles_late;
+    /* Horizontal blank spans H=257, wrap to -84, then -84..-1.  Release at
+       H=0 so assertion and release use the same raster origin as HCOUNT. */
+    if (vdp.sync_irq_ctrl.irq1_source == 1) sh7021_ocpm_intc_set_irq1_line(0);
 }
 
 static void vsync_start()
@@ -232,10 +246,8 @@ static void vsync_start()
 
 static void inc_vcount(uint64_t param, int cycles_late)
 {
-    /* HSync mode drives IRQ1 low only for the horizontal blanking tail of the
-       previous line.  The next line boundary releases it. */
-    if (vdp.sync_irq_ctrl.irq1_source == 1) sh7021_ocpm_intc_set_irq1_line(0);
-    vdp.line_start_timestamp = (uint64_t)timing_get_timestamp(TIMING_CPU_TIMER);
+    int64_t now = timing_get_timestamp(TIMING_CPU_TIMER);
+    vdp.line_start_timestamp = (uint64_t)(now - cycles_late);
     loopy_io_matrix_scan_vcount(vdp.vcount);
 	if (vdp.vcount < vdp.visible_scanlines)
 	{
@@ -259,14 +271,19 @@ static void inc_vcount(uint64_t param, int cycles_late)
 		update_irq1_vsync_line();
 	}
 
-    const int CYCLES_PER_LINE = cpu_cycles_per_ntsc_line();
-    const int CYCLES_UNTIL_HSYNC = vdp_clocks_to_cpu_cycles((int)VDP_NTSC_HACTIVE_CLOCKS);
+    const int CYCLES_PER_LINE = cpu_cycles_for_scanline(vdp.vcount);
+    int hsync_assert_cycles = CYCLES_PER_LINE - 3 - cycles_late;
+    int hsync_release_cycles = video_timing_hcount_to_cpu_cycles(VIDEO_NTSC_H_ACTIVE_START) - cycles_late;
+    if (hsync_assert_cycles < 1) hsync_assert_cycles = 1;
+    if (hsync_release_cycles < 1) hsync_release_cycles = 1;
 
 	TimingUnitCycle scanline_cycles = timing_convert_cpu(CYCLES_PER_LINE - cycles_late);
 	vcount_ev = timing_add_event(vcount_func, scanline_cycles, 0, TIMING_CPU_TIMER);
 
-	TimingUnitCycle hsync_cycles = timing_convert_cpu(CYCLES_UNTIL_HSYNC - cycles_late);
-	hsync_ev = timing_add_event(hsync_func, hsync_cycles, 0, TIMING_CPU_TIMER);
+    hsync_release_ev = timing_add_event(hsync_release_func, timing_convert_cpu(hsync_release_cycles), 0, TIMING_CPU_TIMER);
+    uint16_t next_line = (vdp.vcount == 0x1ffu) ? 0u : (uint16_t)(vdp.vcount + 1u);
+    hsync_assert_ev = timing_add_event(hsync_assert_func, timing_convert_cpu(hsync_assert_cycles),
+                                       next_line < vdp.visible_scanlines, TIMING_CPU_TIMER);
     schedule_irq0_for_line(cycles_late);
 }
 
@@ -309,7 +326,8 @@ void video_initialize()
 	vdp.display_output = (uint16_t *)calloc(VIDEO_OUTPUT_WIDTH * VIDEO_DISPLAY_HEIGHT, sizeof(uint16_t));
 
 	vcount_func = timing_register_func("Video::inc_vcount", inc_vcount);
-	hsync_func = timing_register_func("Video::start_hsync", start_hsync);
+	hsync_assert_func = timing_register_func("Video::start_hsync", start_hsync);
+	hsync_release_func = timing_register_func("Video::end_hsync", end_hsync);
 	irq0_func = timing_register_func("Video::fire_irq0", fire_irq0);
 	irq2_func = timing_register_func("Video::fire_irq2", fire_irq2);
 	irq0_ev = timing_invalid_event_handle();
@@ -449,13 +467,7 @@ static uint16_t video_current_hcount(void)
 {
     int64_t now = timing_get_timestamp(TIMING_CPU_TIMER);
     int64_t elapsed_cpu = now - (int64_t)vdp.line_start_timestamp;
-    int line_cycles = cpu_cycles_per_ntsc_line();
-    if (elapsed_cpu < 0) elapsed_cpu = 0;
-    if (elapsed_cpu >= line_cycles) elapsed_cpu %= line_cycles;
-
-    int64_t vdp_clock = (elapsed_cpu * VDP_NTSC_LINE_CLOCKS) / line_cycles;
-    int h = -84 + (int)(vdp_clock / 4);
-    if (h > 257) h = 257;
+    int h = video_timing_cpu_cycles_to_hcount(elapsed_cpu);
     return (uint16_t)(h & 0x1FF);
 }
 
@@ -567,41 +579,30 @@ static bool video_addr_is_tile_vram(uint32_t addr)
     return addr >= VIDEO_TILE_VRAM_START && addr < VIDEO_TILE_VRAM_END;
 }
 
-static bool video_addr_is_memory(uint32_t addr)
-{
-    return video_addr_is_bitmap_vram(addr) || video_addr_is_tile_vram(addr) ||
-           (addr >= VIDEO_OAM_START && addr < VIDEO_OAM_END) ||
-           (addr >= VIDEO_PALETTE_START && addr < VIDEO_PALETTE_END) ||
-           (addr >= VIDEO_CAPTURE_START && addr < VIDEO_CAPTURE_END) ||
-           (addr >= VIDEO_DMA_START && addr < VIDEO_DMA_END);
-}
-
 int video_bus_wait_cycles(uint32_t raw_addr, uint32_t translated_addr, int bytes, bool write)
 {
     if (!video_bus_is_vdp_addr(raw_addr, translated_addr)) return 0;
 
-    /* Loopy VDP accesses are bus transactions, not plain memory loads/stores.
-       The hardware notes give bitmap VRAM timings measured by DRAM<->VRAM DMA:
-         FBM=0: bitmap read 7 CPU cycles, bitmap write 4 CPU cycles
-         FBM=1: bitmap read 6 CPU cycles, bitmap write 3 CPU cycles
-       For non-bitmap VDP memory the documented baseline is 2+WAIT, with memory
-       WAIT effectively about 2 CPU cycles.  Register accesses use 2+short WAIT,
-       effectively about 3 CPU cycles.  Treat byte accesses to the normal 16-bit
-       VDP map as a full word/RMW bus transaction; 32-bit accesses split into two. */
     int per_word;
-    if (video_addr_is_bitmap_vram(translated_addr)) {
-        bool fast = (vdp.bitmap_mem_ctrl & 0x1u) != 0;
-        per_word = write ? (fast ? 3 : 4) : (fast ? 6 : 7);
-    } else if (video_addr_is_memory(translated_addr)) {
-        per_word = 4;
-    } else {
-        per_word = 3;
-    }
+    if (write) per_word = 3;
+    else if (video_addr_is_bitmap_vram(translated_addr)) per_word = 5;
+    else if (video_addr_is_tile_vram(translated_addr)) per_word = 7;
+    else per_word = 4;
 
     int transfers = (bytes == 4) ? 2 : 1;
     int cycles = per_word * transfers;
-    cycles -= transfers; /* interpreter baseline one cycle per bus transfer */
-    if (cycles < 0) cycles = 0;
+
+    /* Active display occasionally owns bitmap VRAM for a slot.  Use raster
+       phase only, so this is deterministic and needs no save-state field. */
+    if (video_addr_is_bitmap_vram(translated_addr) && vdp.vcount < vdp.visible_scanlines) {
+        uint32_t slot = (uint32_t)timing_get_timestamp(TIMING_CPU_TIMER);
+        slot ^= slot >> 7;
+        slot *= 0x9E3779B1u;
+        slot ^= slot >> 16;
+        unsigned threshold = write ? 47u : 25u;
+        if ((slot & 0xFFu) < threshold) cycles += transfers;
+    }
+
     if (is_low_vdp_mirror(raw_addr)) cycles += bytes;
     return cycles;
 }
@@ -1084,8 +1085,13 @@ void video_ctrl_write16(uint32_t addr, uint16_t value)
 			break;
 		case 0x008:
 		LOOPY_DEBUG_PRINTF("[Video] write SYNC_IRQ_CTRL: %04X\n", value);
-		vdp.sync_irq_ctrl.irq1_enable = value & 0x1;
 		vdp.sync_irq_ctrl.irq1_source = (value >> 1) & 0x1;
+        /* The line-mode output is sampled through a raster latch: after it is
+           enabled, the first boundary arms the latch and the following line
+           produces the first falling edge.  Round-3 observes that first edge
+           on VCOUNT 4 when the probe is armed on line 2. */
+        vdp.sync_irq_ctrl.irq1_enable = (value & 0x1)
+            ? (vdp.sync_irq_ctrl.irq1_source ? 2 : 1) : 0;
 		if (vdp.sync_irq_ctrl.irq1_source == 0) update_irq1_vsync_line();
 		else sh7021_ocpm_intc_set_irq1_line(0);
 		break;

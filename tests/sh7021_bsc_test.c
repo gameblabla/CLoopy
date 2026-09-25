@@ -56,10 +56,18 @@ int main(void) {
     expect16("area 2 read WAIT sample bit", sh7021_bsc_area_wait_sample_read(2), 0x0001u);
     expect16("area02 long wait", sh7021_bsc_long_wait_area02(), 0x0001u);
 
-    /* CLoopy starts directly at cartridge startup, after the point where the
-       retail BIOS has configured the BSC.  Pin that post-BIOS image because
-       CPU/cart/DRAM timing depends on it. */
-    sh7021_ocpm_bsc_apply_loopy_boot_state();
+    /* The Loopy BIOS programs this image through the ordinary BSC registers.
+       Reproduce those writes here to pin the register semantics without an
+       emulator-only "post BIOS" initializer. */
+    sh7021_ocpm_bsc_write16(0x05ffffa0u, 0x9000u);
+    sh7021_ocpm_bsc_write16(0x05ffffa2u, 0xb9fdu);
+    sh7021_ocpm_bsc_write16(0x05ffffa4u, 0xb9b9u);
+    sh7021_ocpm_bsc_write16(0x05ffffa6u, 0xa800u);
+    sh7021_ocpm_bsc_write16(0x05ffffa8u, 0x5d00u);
+    sh7021_ocpm_bsc_write16(0x05ffffacu, 0x5a80u);
+    sh7021_ocpm_bsc_write16(0x05ffffb2u, 0x967au);
+    sh7021_ocpm_bsc_write16(0x05ffffb0u, 0x6900u);
+    sh7021_ocpm_bsc_write16(0x05ffffaeu, 0xa508u);
     expect16("Loopy BCR", sh7021_bsc_bcr(), 0x9000u);
     expect16("Loopy WCR1", sh7021_bsc_wcr1(), 0xb9fdu);
     expect16("Loopy WCR2", sh7021_bsc_wcr2(), 0xb9b9u);

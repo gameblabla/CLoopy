@@ -376,13 +376,38 @@ int timing_get_state_blob(void *dst, uint32_t size) {
     return p == end ? 0 : -1;
 }
 
-int timing_set_state_blob(const void *src, uint32_t size) {
+int timing_validate_state_blob(const void *src, uint32_t size) {
     if (!src || size < sizeof(TimingSaveHeader)) return -1;
     const uint8_t *p = (const uint8_t *)src;
     const uint8_t *end = p + size;
     TimingSaveHeader h;
     if (timing_blob_read(&p, end, &h, sizeof(h)) != 0) return -1;
     if (h.magic != 0x54494D47u || h.version != 1 || h.timer_count != TIMING_NUM_TIMERS) return -1;
+    if (h.cur_timer_id < -1 || h.cur_timer_id >= TIMING_NUM_TIMERS) return -1;
+
+    for (int i = 0; i < TIMING_NUM_TIMERS; i++) {
+        TimerSaveHeader th;
+        if (timing_blob_read(&p, end, &th, sizeof(th)) != 0) return -1;
+        if (th.in_slice != 0 && th.in_slice != 1) return -1;
+        if ((uint64_t)th.event_count > (uint64_t)(end - p) / sizeof(EventSave)) return -1;
+        for (uint32_t e = 0; e < th.event_count; e++) {
+            EventSave es;
+            if (timing_blob_read(&p, end, &es, sizeof(es)) != 0) return -1;
+            if (es.func_index < 0 || (size_t)es.func_index >= state.func_count) return -1;
+        }
+    }
+    return p == end ? 0 : -1;
+}
+
+int timing_set_state_blob(const void *src, uint32_t size) {
+    /* Validate the complete stream before mutating any timer, so a malformed
+       state cannot leave a partially restored scheduler behind. */
+    if (timing_validate_state_blob(src, size) != 0) return -1;
+
+    const uint8_t *p = (const uint8_t *)src;
+    const uint8_t *end = p + size;
+    TimingSaveHeader h;
+    if (timing_blob_read(&p, end, &h, sizeof(h)) != 0) return -1;
     for (int i = 0; i < TIMING_NUM_TIMERS; i++) {
         TimerSaveHeader th;
         if (timing_blob_read(&p, end, &th, sizeof(th)) != 0) return -1;
@@ -401,7 +426,6 @@ int timing_set_state_blob(const void *src, uint32_t size) {
         for (size_t e = 0; e < th.event_count; e++) {
             EventSave es;
             if (timing_blob_read(&p, end, &es, sizeof(es)) != 0) return -1;
-            if (es.func_index < 0 || (size_t)es.func_index >= state.func_count) continue;
             size_t dst = t->event_count++;
             t->events[dst].exec_time = es.exec_time;
             t->events[dst].param = es.param;
@@ -411,6 +435,6 @@ int timing_set_state_blob(const void *src, uint32_t size) {
         heapify(t);
     }
     if (p != end) return -1;
-    state.cur_timer = (h.cur_timer_id >= 0 && h.cur_timer_id < TIMING_NUM_TIMERS) ? &state.timers[h.cur_timer_id] : NULL;
+    state.cur_timer = (h.cur_timer_id >= 0) ? &state.timers[h.cur_timer_id] : NULL;
     return 0;
 }

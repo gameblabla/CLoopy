@@ -4,8 +4,12 @@
 
 #define SH7021_OCPM_IO_BASE_ADDR 0x05000000u
 #define SH7021_OCPM_IO_END_ADDR 0x06000000u
+/* Area 7 is the SH7021's 1 KiB on-chip RAM.  Only A9..A0 select a byte;
+   A23..A10 are ignored, so the 1 KiB RAM is shadowed throughout the whole
+   H'F000000..H'FFFFFFF logical area. */
 #define SH7021_OCPM_ORAM_BASE_ADDR 0x0F000000u
-#define SH7021_OCPM_ORAM_END_ADDR 0x0F000400u
+#define SH7021_OCPM_ORAM_END_ADDR  0x10000000u
+#define SH7021_OCPM_ORAM_SIZE      0x00000400u
 
 uint8_t sh7021_ocpm_io_read8(uint32_t addr);
 uint16_t sh7021_ocpm_io_read16(uint32_t addr);

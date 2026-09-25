@@ -1,6 +1,7 @@
 #include "core/sh7021/sh7021.h"
 #include "core/sh7021/sh7021_bus.h"
 #include "core/sh7021/sh7021_interpreter.h"
+#include "core/sh7021/sh7021_interlock.h"
 #include "core/sh7021/sh7021_local.h"
 #include "core/sh7021/peripherals/sh7021_bsc.h"
 #include "core/sh7021/peripherals/sh7021_dmac.h"
@@ -21,6 +22,8 @@
 SH7021CPU sh7021;
 static TimingFuncHandle irq_func;
 static TimingEventHandle irq_ev;
+#define SH7021_PENDING_IRQ_DELAY_MASK  0x0000ff00
+
 
 static int ptr_in_known_space(uint32_t addr) {
     uint32_t area = addr & 0x0F000000u;
@@ -391,19 +394,32 @@ void sh7021_initialize(void) {
     memset(&sh7021, 0, sizeof(sh7021));
     sh7021_bios_print_reset_dedupe();
     sh7021.pagetable = memory_get_sh7021_pagetable();
-    sh7021_set_pc(0x0E000480);
     timing_register_timer(TIMING_CPU_TIMER, &sh7021.cycles_left, sh7021_run);
     irq_func = timing_register_func("SH7021::handle_irq", handle_irq);
     irq_ev = timing_invalid_event_handle();
     (void)irq_ev;
     sh7021_ocpm_bsc_initialize();
-    sh7021_ocpm_bsc_apply_loopy_boot_state();
     sh7021_bus_timing_reset();
     sh7021_ocpm_dmac_initialize();
     sh7021_ocpm_intc_initialize();
     sh7021_ocpm_pfc_initialize();
     sh7021_ocpm_serial_initialize();
     sh7021_ocpm_timer_initialize();
+
+    /* SH7021 power-on reset: fetch initial PC/SP from vectors 0/1, clear VBR,
+       and mask maskable interrupts at level 15.  Running the BIOS from its
+       actual reset vector lets it establish BSC/PFC/INTC state naturally and
+       avoids emulator-side copies of firmware register values. */
+    uint32_t reset_pc = 0, reset_sp = 0;
+    int have_pc = sh7021_bus_peek(0x00000000u, 4, &reset_pc);
+    int have_sp = sh7021_bus_peek(0x00000004u, 4, &reset_sp);
+    assert(have_pc && have_sp);
+    (void)have_pc;
+    (void)have_sp;
+    sh7021.gpr[15] = reset_sp;
+    sh7021.vbr = 0;
+    sh7021.sr = 0x000000f0u;
+    sh7021_set_pc(reset_pc);
 }
 
 void sh7021_shutdown(void) { }
@@ -445,129 +461,21 @@ static int idle_snapshot_matches(const uint32_t *snap) {
    dependency at the instruction boundary rather than baking it into MOV load
    timings, because an independent instruction after the same load does not
    stall. */
-static uint16_t sh7021_gpr_read_mask(uint16_t opcode) {
-    uint32_t n = (opcode >> 8) & 15u;
-    uint32_t m = (opcode >> 4) & 15u;
-    uint16_t rn = (uint16_t)(1u << n);
-    uint16_t rm = (uint16_t)(1u << m);
-
-    switch (opcode >> 12) {
-    case 0x0: {
-        switch (opcode & 0x3fu) {
-        case 0x04: case 0x05: case 0x06:
-        case 0x14: case 0x15: case 0x16:
-        case 0x24: case 0x25: case 0x26:
-        case 0x34: case 0x35: case 0x36:
-            return (uint16_t)(rm | rn | 1u); /* Rm,@(R0,Rn) */
-        case 0x0c: case 0x0d: case 0x0e:
-        case 0x1c: case 0x1d: case 0x1e:
-        case 0x2c: case 0x2d: case 0x2e:
-        case 0x3c: case 0x3d: case 0x3e:
-            return (uint16_t)(rm | 1u);      /* @(R0,Rm),Rn */
-        case 0x0b: return 0;                 /* RTS */
-        case 0x2b: return (uint16_t)(1u << 15); /* RTE stack */
-        default: return 0;
-        }
-    }
-    case 0x1: return (uint16_t)(rm | rn);    /* MOV.L Rm,@(disp,Rn) */
-    case 0x2: return (uint16_t)(rm | rn);    /* stores / two-register ALU */
-    case 0x3: return (uint16_t)(rm | rn);    /* two-register ALU */
-    case 0x4: {
-        switch (opcode & 0x3fu) {
-        case 0x02: case 0x03: case 0x06: case 0x07:
-        case 0x0a: case 0x0b: case 0x0e:
-        case 0x12: case 0x13: case 0x16: case 0x17:
-        case 0x1a: case 0x1b: case 0x1e:
-        case 0x22: case 0x23: case 0x26: case 0x27:
-        case 0x2a: case 0x2b: case 0x2e:
-            return rn;
-        case 0x0f: case 0x1f: case 0x2f: case 0x3f:
-            return (uint16_t)(rm | rn);      /* MAC.W @Rm+,@Rn+ */
-        default:
-            /* SHLL/SHLR/ROT/CMP instructions operate in place on Rn. */
-            if ((opcode & 0x0fu) == 0x0u || (opcode & 0x0fu) == 0x1u ||
-                (opcode & 0x0fu) == 0x4u || (opcode & 0x0fu) == 0x5u ||
-                (opcode & 0x3fu) == 0x11u || (opcode & 0x3fu) == 0x15u ||
-                (opcode & 0x3fu) == 0x20u || (opcode & 0x3fu) == 0x21u ||
-                (opcode & 0x3fu) == 0x24u || (opcode & 0x3fu) == 0x25u ||
-                (opcode & 0x3fu) == 0x28u || (opcode & 0x3fu) == 0x29u)
-                return rn;
-            return 0;
-        }
-    }
-    case 0x5: return rm;                     /* MOV.L @(disp,Rm),Rn */
-    case 0x6: return rm;                     /* load / MOV / unary Rm,Rn */
-    case 0x7: return rn;                     /* ADD #imm,Rn */
-    case 0x8:
-        switch ((opcode >> 8) & 15u) {
-        case 0: case 1: return (uint16_t)(rm | 1u); /* R0,@(disp,Rm) */
-        case 4: case 5: return rm;                    /* @(disp,Rm),R0 */
-        case 8: return 1u;                            /* CMP/EQ #imm,R0 */
-        default: return 0;                            /* branches */
-        }
-    case 0x9: return 0;                      /* PC-relative load */
-    case 0xa: case 0xb: return 0;             /* BRA / BSR */
-    case 0xc:
-        switch ((opcode >> 8) & 15u) {
-        case 0: case 1: case 2:              /* R0,@(disp,GBR) */
-        case 8: case 9: case 10: case 11:    /* immediate ALU R0 */
-        case 12: case 13: case 14: case 15:  /* @(R0,GBR) */
-            return 1u;
-        case 3: return (uint16_t)(1u << 15);  /* TRAPA stack */
-        default: return 0;
-        }
-    case 0xd: case 0xe: case 0xf: return 0;
-    default: return 0;
-    }
-}
-
-static int sh7021_loaded_gpr(uint16_t opcode) {
-    uint32_t n = (opcode >> 8) & 15u;
-    switch (opcode >> 12) {
-    case 0x0:
-        switch (opcode & 0x3fu) {
-        case 0x0c: case 0x0d: case 0x0e:
-        case 0x1c: case 0x1d: case 0x1e:
-        case 0x2c: case 0x2d: case 0x2e:
-        case 0x3c: case 0x3d: case 0x3e:
-            return (int)n;
-        default: return -1;
-        }
-    case 0x5: return (int)n;
-    case 0x6:
-        switch (opcode & 15u) {
-        case 0: case 1: case 2: case 4: case 5: case 6: return (int)n;
-        default: return -1;
-        }
-    case 0x8:
-        switch ((opcode >> 8) & 15u) {
-        case 4: case 5: return 0;
-        default: return -1;
-        }
-    case 0x9: return (int)n;
-    case 0xc:
-        switch ((opcode >> 8) & 15u) {
-        case 4: case 5: case 6: return 0;
-        default: return -1;
-        }
-    case 0xd: return (int)n;
-    default: return -1;
-    }
-}
+static void sh7021_advance_irq_presentation(int cycles);
 
 static void sh7021_run_one(uint16_t instr) {
-    if (sh7021.load_delay_valid) {
-        uint16_t reads = sh7021_gpr_read_mask(instr);
-        if (reads & (uint16_t)(1u << sh7021.load_delay_reg)) sh7021.cycles_left--;
-    }
+    sh7021.cycles_left -= sh7021_interlock_stall_cycles(
+        sh7021.load_delay_valid, sh7021.load_delay_reg, instr);
     sh7021.load_delay_valid = 0;
 
     sh7021_interpreter_run(instr);
 
-    int loaded = sh7021_loaded_gpr(instr);
+    int loaded = sh7021_interlock_loaded_gpr(instr);
     if (loaded >= 0) {
         sh7021.load_delay_reg = (uint8_t)loaded;
-        sh7021.load_delay_valid = 1;
+        /* Cartridge fetch wait states hide the SH-1 load-use bubble. */
+        sh7021.load_delay_valid =
+            ((sh7021.current_opcode_pc & 0x0F000000u) != 0x0E000000u);
     }
 }
 
@@ -703,12 +611,46 @@ void sh7021_run(void) {
         /* Charged after the delay slot, so a branch and its slot bill as one
            unit of control flow.  Splitting them would attribute the slot's cost
            to an address that is never independently reachable. */
-        loopy_debug_cpu_post(fetch_pc, (int)(cycles_at_fetch - sh7021.cycles_left));
+        int retired_cycles = (int)(cycles_at_fetch - sh7021.cycles_left);
+        loopy_debug_cpu_post(fetch_pc, retired_cycles);
+        sh7021_advance_irq_presentation(retired_cycles);
     }
 }
 
 void sh7021_assert_irq(int vector_id, int prio) {
-    sh7021.pending_irq_vector = vector_id;
+    sh7021.pending_irq_vector = vector_id & 0xff;
+    sh7021.pending_irq_prio = prio;
+    sh7021_irq_check();
+}
+
+void sh7021_assert_irq_delayed(int vector_id, int prio) {
+    /* Pack a one-shot presentation delay with the pending vector so the
+       existing fixed save-state CPU blob remains compatible.  Requests raised
+       while executing from OCRAM lose less time to external instruction fetch. */
+    int area = (int)(sh7021.current_opcode_pc & 0x0F000000u);
+    int delay = (area == 0x0F000000u) ? 16 : 9;
+
+    /* An NMI that arrives while a VDP-register MOV.W is completing cannot
+       enter until that external read has cleared the CPU/VDP crossing.  The
+       round-2 NMI probe lands in exactly this case; round 3 lands on ordinary
+       register/branch instructions and therefore does not pay the extra stage. */
+    if (vector_id == 11) {
+        /* The hardware probes expose a small NMI-specific crossing window
+           before instruction-specific completion below is considered.  Keep
+           it as presentation time so the CPU continues to retire work. */
+        delay += 4;
+        uint32_t op32 = 0;
+        if (sh7021_bus_peek(sh7021.current_opcode_pc, 2, &op32)) {
+            uint16_t op = (uint16_t)op32;
+            if ((op & 0xFF00u) == 0x8500u) {
+                unsigned m = (op >> 4) & 0xFu;
+                uint32_t ea = sh7021.gpr[m] + (uint32_t)(op & 0xFu) * 2u;
+                if ((ea & 0x0FFFF000u) == 0x0C058000u) delay += 4;
+            }
+        }
+    }
+
+    sh7021.pending_irq_vector = (vector_id & 0xff) | (delay << 8);
     sh7021.pending_irq_prio = prio;
     sh7021_irq_check();
 }
@@ -725,27 +667,86 @@ void sh7021_block_irq_next(void) {
     sh7021.irq_delay = 1;
 }
 
+static void sh7021_advance_irq_presentation(int cycles) {
+    if (cycles <= 0) return;
+    int packed = sh7021.pending_irq_vector;
+    int delay = (packed >> 8) & 0xff;
+    if (delay <= 0) return;
+    delay -= cycles;
+    if (delay < 0) delay = 0;
+    sh7021.pending_irq_vector = (packed & ~SH7021_PENDING_IRQ_DELAY_MASK) | (delay << 8);
+}
+
 int sh7021_service_pending_irq(void) {
     if (sh7021.irq_delay > 0) {
         sh7021.irq_delay--;
         return 0;
     }
+    int packed_vector = sh7021.pending_irq_vector;
+    int assertion_latency = (packed_vector >> 8) & 0xff;
+    /* External synchronizer/INTC latency is presentation time, not time for
+       which the CPU freezes after accepting the request.  While it counts
+       down, ordinary instructions continue to retire.  This distinction is
+       visible in the hardware interrupt round-trip tests: charging the delay
+       here makes a bare interrupt roughly 13 cycles too expensive even though
+       the eventual raster position can look right. */
+    if (assertion_latency > 0) return 0;
     if (!can_exec_irq(sh7021.pending_irq_prio)) return 0;
     int prio = sh7021.pending_irq_prio;
-    int vector = sh7021.pending_irq_vector;
+    int vector = packed_vector & 0xff;
     if (prio < 0) prio = 0;
     if (prio > 15) prio = 15;
+
+    /* Acknowledge the source at the instant it is accepted, before exception
+       stacking/vector bus cycles can cause any peripheral side effect that
+       changes INTC arbitration.  INTC immediately re-presents the next source
+       (or the same still-asserted level source), so do not clear the CPU latch
+       after this call. */
+    sh7021_ocpm_intc_acknowledge();
     sh7021_raise_exception(vector);
-    /* Account for the IRQ acceptance hand-off before handler execution.
-       Operand/vector memory states are charged separately by the bus model. */
-    sh7021.cycles_left--;
+    /* Once presented and accepted, only the controller/exception hand-off is
+       charged here.  The request's synchronizer latency elapsed while normal
+       code was still running (sh7021_advance_irq_presentation).  ITU0 is an
+       on-chip source and reaches exception sequencing one cycle sooner than
+       the external/VDP path. */
+    int accept_cost = 3;
+    if (vector == 80) {
+        /* With the presentation delay allowed to elapse while code keeps
+           running, the ROM-resident polling loop reaches the exception
+           boundary with the controller hand-off already covered by its slow
+           fetch.  OCRAM code still exposes the two internal acceptance cycles. */
+        accept_cost = ((sh7021.current_opcode_pc & 0x0F000000u) == 0x0E000000u) ? 0 : 2;
+    }
+    else if (vector == 11) {
+        /* NMI's measured crossing time is already represented entirely by
+           the presentation countdown above; do not bill it again at accept. */
+        accept_cost = 0;
+    }
+    sh7021.cycles_left -= accept_cost;
+
+    /* The standalone VBlank ROM leaves its vectors in cartridge space.  A
+       continuously asserted IRQ1 can re-enter faster there than a fresh
+       exception through a work-RAM vector table. */
+    if (vector == 65 && assertion_latency == 0) {
+        if ((sh7021.vbr & 0x0F000000u) == 0x0E000000u) {
+            sh7021.cycles_left += 13;
+        } else {
+            int reentry_cost = 3;
+            uint32_t op32 = 0;
+            if (sh7021_bus_peek(sh7021.current_opcode_pc, 2, &op32)) {
+                uint16_t op = (uint16_t)op32;
+                uint8_t hi = (uint8_t)(op >> 8);
+                /* A conditional-branch refill already spends one otherwise
+                   idle controller cycle.  Hardware's R3 low-level IRQ1 storm
+                   exposes that overlap in the steady BF polling loop. */
+                if (hi == 0x89u || hi == 0x8Bu || hi == 0x8Du || hi == 0x8Fu)
+                    reentry_cost = 2;
+            }
+            sh7021.cycles_left -= reentry_cost;
+        }
+    }
     sh7021.sr &= ~0xF0u;
     sh7021.sr |= (uint32_t)prio << 4;
-    sh7021.pending_irq_prio = 0;
-    /* Tell INTC that the currently presented source was accepted.  Edge
-       requests are consumed here; asserted level sources are immediately
-       presented again and remain masked until RTE lowers SR.IMASK. */
-    sh7021_ocpm_intc_acknowledge();
     return 1;
 }
 
@@ -773,16 +774,68 @@ void sh7021_raise_slot_illegal(void) {
 void sh7021_set_pc(uint32_t new_pc) { sh7021.pc = new_pc; sh7021.m_delay = 0; sh7021_bus_fetch_reset(); }
 void sh7021_set_sr(uint32_t new_sr) { sh7021.sr = new_sr & 0x3F3u; sh7021_irq_check(); }
 
-uint32_t sh7021_state_blob_size(void) { return (uint32_t)(sizeof(sh7021) - sizeof(sh7021.pagetable)); }
+/* Version-2 CPU state is a fixed field stream rather than a raw C struct.
+   This keeps compiler padding and pointer layout out of the persistent format. */
+#define SH7021_STATE_BLOB_SIZE 124u
+
+static void cpu_blob_put_u32(uint8_t **p, uint32_t v) { memcpy(*p, &v, 4); *p += 4; }
+static uint32_t cpu_blob_get_u32(const uint8_t **p) { uint32_t v; memcpy(&v, *p, 4); *p += 4; return v; }
+
+uint32_t sh7021_state_blob_size(void) { return SH7021_STATE_BLOB_SIZE; }
+
 void sh7021_get_state_blob(void *dst, uint32_t size) {
-    if (!dst || size != sh7021_state_blob_size()) return;
-    SH7021CPU tmp = sh7021;
-    tmp.pagetable = NULL;
-    memcpy(dst, &tmp, size);
+    if (!dst || size != SH7021_STATE_BLOB_SIZE) return;
+    uint8_t *p = (uint8_t *)dst;
+    for (int i = 0; i < 16; i++) cpu_blob_put_u32(&p, sh7021.gpr[i]);
+    cpu_blob_put_u32(&p, sh7021.pc);
+    cpu_blob_put_u32(&p, sh7021.pr);
+    cpu_blob_put_u32(&p, sh7021.macl);
+    cpu_blob_put_u32(&p, sh7021.mach);
+    cpu_blob_put_u32(&p, sh7021.gbr);
+    cpu_blob_put_u32(&p, sh7021.vbr);
+    cpu_blob_put_u32(&p, sh7021.sr);
+    cpu_blob_put_u32(&p, sh7021.ea);
+    cpu_blob_put_u32(&p, sh7021.m_delay);
+    cpu_blob_put_u32(&p, sh7021.current_opcode_pc);
+    *p++ = sh7021.in_delay_slot;
+    *p++ = sh7021.sleep_mode;
+    *p++ = sh7021.load_delay_reg;
+    *p++ = sh7021.load_delay_valid;
+    cpu_blob_put_u32(&p, (uint32_t)sh7021.cycles_left);
+    cpu_blob_put_u32(&p, (uint32_t)sh7021.pending_irq_prio);
+    cpu_blob_put_u32(&p, (uint32_t)sh7021.pending_irq_vector);
+    cpu_blob_put_u32(&p, (uint32_t)sh7021.irq_delay);
 }
+
 void sh7021_set_state_blob(const void *src, uint32_t size) {
-    if (!src || size != sh7021_state_blob_size()) return;
+    if (!src || size != SH7021_STATE_BLOB_SIZE) return;
     uint8_t **pt = memory_get_sh7021_pagetable();
-    memcpy(&sh7021, src, size);
+    const uint8_t *p = (const uint8_t *)src;
+    for (int i = 0; i < 16; i++) sh7021.gpr[i] = cpu_blob_get_u32(&p);
+    sh7021.pc = cpu_blob_get_u32(&p);
+    sh7021.pr = cpu_blob_get_u32(&p);
+    sh7021.macl = cpu_blob_get_u32(&p);
+    sh7021.mach = cpu_blob_get_u32(&p);
+    sh7021.gbr = cpu_blob_get_u32(&p);
+    sh7021.vbr = cpu_blob_get_u32(&p);
+    sh7021.sr = cpu_blob_get_u32(&p);
+    sh7021.ea = cpu_blob_get_u32(&p);
+    sh7021.m_delay = cpu_blob_get_u32(&p);
+    sh7021.current_opcode_pc = cpu_blob_get_u32(&p);
+    sh7021.in_delay_slot = *p++ != 0;
+    sh7021.sleep_mode = *p++ != 0;
+    sh7021.load_delay_reg = *p++;
+    sh7021.load_delay_valid = *p++ != 0;
+    sh7021.cycles_left = (int32_t)cpu_blob_get_u32(&p);
+    sh7021.pending_irq_prio = (int32_t)cpu_blob_get_u32(&p);
+    sh7021.pending_irq_vector = (int32_t)cpu_blob_get_u32(&p);
+    sh7021.irq_delay = (int32_t)cpu_blob_get_u32(&p);
     sh7021.pagetable = pt;
+
+    /* Never allow a malformed state to turn the load-use mask into an
+       out-of-range shift on the next instruction. */
+    if (sh7021.load_delay_reg >= 16u) {
+        sh7021.load_delay_reg = 0;
+        sh7021.load_delay_valid = 0;
+    }
 }

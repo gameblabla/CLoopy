@@ -52,29 +52,45 @@ CORE_SRC := $(filter-out src/main.c src/sdl3/main_sdl3.c src/libretro/libretro.c
 HEADLESS_SRC := src/main.c $(MCP_SRC)
 SDL3_SRC := src/sdl3/main_sdl3.c
 LIBRETRO_SRC := src/libretro/libretro.c
+CORE_OBJ := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(CORE_SRC))
 HEADLESS_OBJ := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(CORE_SRC) $(HEADLESS_SRC))
 SDL3_OBJ := $(patsubst src/%.c,$(BUILD_DIR)/%.sdl3.o,$(CORE_SRC) $(SDL3_SRC))
 LIBRETRO_OBJ := $(patsubst src/%.c,$(BUILD_DIR)/%.lr.o,$(CORE_SRC) $(LIBRETRO_SRC))
 DEP := $(HEADLESS_OBJ:.o=.d) $(SDL3_OBJ:.o=.d) $(LIBRETRO_OBJ:.o=.d)
 
-.PHONY: all headless sdl3 sdl3-check libretro wanwan-oki-rom test test-cpu test-disasm test-bsc test-io test-mouse test-printer test-cmdlist clean run-smoke run-smoke-debug
+.PHONY: all headless sdl3 sdl3-check libretro wanwan-oki-rom test test-cpu test-interlock test-disasm test-bsc test-pfc test-serial test-video-timing test-state test-io test-mouse test-printer test-cmdlist clean run-smoke run-smoke-debug
 all: $(WANWAN_OKI_ROM_PREREQ) headless
 headless: $(WANWAN_OKI_ROM_PREREQ) $(TARGET_HEADLESS)
 sdl3: $(WANWAN_OKI_ROM_PREREQ) $(TARGET_SDL3)
 sdl3-check: $(WANWAN_OKI_ROM_PREREQ) $(SDL3_OBJ)
 libretro: $(WANWAN_OKI_ROM_PREREQ) $(TARGET_LIBRETRO)
 
-test: test-cpu test-disasm test-bsc test-io test-mouse test-printer test-cmdlist
+test: test-cpu test-interlock test-disasm test-bsc test-pfc test-serial test-video-timing test-state test-io test-mouse test-printer test-cmdlist
 
 
 test-cpu: $(BUILD_DIR)/tests/sh7021_sign_extension_test
 	./$(BUILD_DIR)/tests/sh7021_sign_extension_test
+
+test-interlock: $(BUILD_DIR)/tests/sh7021_interlock_test
+	./$(BUILD_DIR)/tests/sh7021_interlock_test
 
 test-disasm: $(BUILD_DIR)/tests/sh7021_disasm_test
 	./$(BUILD_DIR)/tests/sh7021_disasm_test
 
 test-bsc: $(BUILD_DIR)/tests/sh7021_bsc_test
 	./$(BUILD_DIR)/tests/sh7021_bsc_test
+
+test-pfc: $(BUILD_DIR)/tests/sh7021_pfc_test
+	./$(BUILD_DIR)/tests/sh7021_pfc_test
+
+test-serial: $(BUILD_DIR)/tests/sh7021_serial_test
+	./$(BUILD_DIR)/tests/sh7021_serial_test
+
+test-video-timing: $(BUILD_DIR)/tests/video_timing_test
+	./$(BUILD_DIR)/tests/video_timing_test
+
+test-state: $(BUILD_DIR)/tests/system_state_test
+	./$(BUILD_DIR)/tests/system_state_test
 
 test-io: $(BUILD_DIR)/tests/io_controller_mode_test
 	./$(BUILD_DIR)/tests/io_controller_mode_test
@@ -93,6 +109,10 @@ $(BUILD_DIR)/tests/sh7021_sign_extension_test: tests/sh7021_sign_extension_test.
 	@mkdir -p $(dir $@)
 	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/sh7021_sign_extension_test.c src/core/sh7021/sh7021_interpreter.c -o $@
 
+$(BUILD_DIR)/tests/sh7021_interlock_test: tests/sh7021_interlock_test.c src/core/sh7021/sh7021_interlock.c src/core/sh7021/sh7021_interlock.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/sh7021_interlock_test.c src/core/sh7021/sh7021_interlock.c -o $@
+
 $(BUILD_DIR)/tests/sh7021_disasm_test: tests/sh7021_disasm_test.c src/core/sh7021/sh7021_disasm.c src/core/sh7021/sh7021_disasm.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/sh7021_disasm_test.c src/core/sh7021/sh7021_disasm.c -o $@
@@ -100,6 +120,22 @@ $(BUILD_DIR)/tests/sh7021_disasm_test: tests/sh7021_disasm_test.c src/core/sh702
 $(BUILD_DIR)/tests/sh7021_bsc_test: tests/sh7021_bsc_test.c src/core/sh7021/peripherals/sh7021_bsc.c src/core/sh7021/peripherals/sh7021_bsc.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/sh7021_bsc_test.c src/core/sh7021/peripherals/sh7021_bsc.c -o $@
+
+$(BUILD_DIR)/tests/sh7021_pfc_test: tests/sh7021_pfc_test.c src/core/sh7021/peripherals/sh7021_pfc.c src/core/sh7021/peripherals/sh7021_pfc.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/sh7021_pfc_test.c src/core/sh7021/peripherals/sh7021_pfc.c -o $@
+
+$(BUILD_DIR)/tests/sh7021_serial_test: tests/sh7021_serial_test.c src/core/sh7021/peripherals/sh7021_serial.c src/core/sh7021/peripherals/sh7021_serial.h src/core/timing.c src/core/timing.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/sh7021_serial_test.c src/core/sh7021/peripherals/sh7021_serial.c src/core/timing.c -o $@
+
+$(BUILD_DIR)/tests/video_timing_test: tests/video_timing_test.c src/video/video_timing.c src/video/video_timing.h src/core/timing.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/video_timing_test.c src/video/video_timing.c -o $@
+
+$(BUILD_DIR)/tests/system_state_test: tests/system_state_test.c $(CORE_OBJ)
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/system_state_test.c $(CORE_OBJ) $(LDFLAGS) $(LDLIBS) -o $@
 
 ifeq ($(WANWAN_OKI_ROM_BUILD),0)
 wanwan-oki-rom:

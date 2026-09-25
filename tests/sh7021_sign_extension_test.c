@@ -16,6 +16,14 @@ uint8_t sh7021_bus_read8(uint32_t addr) { (void)addr; return (uint8_t)fake_read1
 uint16_t sh7021_bus_read16(uint32_t addr) { (void)addr; return fake_read16; }
 uint16_t sh7021_bus_fetch16(uint32_t addr) { return sh7021_bus_read16(addr); }
 uint32_t sh7021_bus_read32(uint32_t addr) { (void)addr; return fake_read32; }
+int sh7021_bus_peek(uint32_t addr, int bytes, uint32_t *out_value) {
+    (void)addr;
+    if (!out_value) return 0;
+    if (bytes == 2) { *out_value = fake_read16; return 1; }
+    if (bytes == 4) { *out_value = fake_read32; return 1; }
+    if (bytes == 1) { *out_value = (uint8_t)fake_read16; return 1; }
+    return 0;
+}
 void sh7021_bus_write8(uint32_t addr, uint8_t data) { (void)addr; (void)data; }
 void sh7021_bus_write16(uint32_t addr, uint16_t data) { (void)addr; (void)data; }
 void sh7021_bus_write32(uint32_t addr, uint32_t data) {

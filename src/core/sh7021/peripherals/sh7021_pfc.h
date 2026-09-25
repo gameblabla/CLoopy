@@ -5,8 +5,10 @@
 void sh7021_ocpm_pfc_initialize(void);
 uint8_t sh7021_ocpm_pfc_read8(uint32_t addr);
 uint16_t sh7021_ocpm_pfc_read16(uint32_t addr);
+uint32_t sh7021_ocpm_pfc_read32(uint32_t addr);
 void sh7021_ocpm_pfc_write8(uint32_t addr, uint8_t value);
 void sh7021_ocpm_pfc_write16(uint32_t addr, uint16_t value);
+void sh7021_ocpm_pfc_write32(uint32_t addr, uint32_t value);
 int sh7021_ocpm_pfc_handles(uint32_t addr);
 
 uint32_t sh7021_ocpm_pfc_state_blob_size(void);

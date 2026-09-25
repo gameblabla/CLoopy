@@ -7,6 +7,10 @@ void sh7021_ocpm_serial_initialize(void);
 uint8_t sh7021_ocpm_serial_read8(uint32_t addr);
 void sh7021_ocpm_serial_write8(uint32_t addr, uint8_t value);
 void sh7021_ocpm_serial_set_tx_callback(int port, SerialTxCallback callback);
+/* DMAC handshake inputs.  A DMA transfer to TDR / from RDR clears the
+   corresponding SCI data-ready flag just as the SH7021 peripheral does. */
+void sh7021_ocpm_serial_dma_tx_ack(int port);
+void sh7021_ocpm_serial_dma_rx_ack(int port);
 
 uint32_t sh7021_ocpm_serial_state_blob_size(void);
 void sh7021_ocpm_serial_get_state_blob(void *dst, uint32_t size);

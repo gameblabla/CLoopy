@@ -60,6 +60,7 @@ void cart_sram_commit_check(void) {
 
 void *cart_get_sram_data(void) { return state.sram.data; }
 uint32_t cart_get_sram_size(void) { return (uint32_t)state.sram.size; }
+int cart_is_present(void) { return state.rom.data != NULL && state.rom.size != 0; }
 
 uint32_t cart_state_blob_size(void) { return (uint32_t)state.sram.size; }
 void cart_get_state_blob(void *dst, uint32_t size) { if (dst && state.sram.data && size == state.sram.size) memcpy(dst, state.sram.data, state.sram.size); }

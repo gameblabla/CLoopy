@@ -25,7 +25,7 @@ static int source_pending(int id) {
     return state.pending_irqs[id] || state.edge_pending[id];
 }
 
-static void send_irq_signal(void) {
+static void send_irq_signal(int delayed_new_request, int force_represent) {
     int vector = 0;
     int highest_prio = 0;
     int highest_id = -1;
@@ -36,8 +36,17 @@ static void send_irq_signal(void) {
             highest_id = id;
         }
     }
+    int old_presented = state.presented_irq;
     state.presented_irq = highest_id;
-    sh7021_assert_irq(vector, highest_prio);
+
+    /* Preserve a newly presented request until the CPU accepts it.  A source
+       that was already presented need not rewrite the CPU latch just because
+       another source changed state; acknowledge explicitly forces re-presentation
+       for level-triggered sources. */
+    if (!force_represent && highest_id == old_presented) return;
+
+    if (delayed_new_request && highest_id >= 0) sh7021_assert_irq_delayed(vector, highest_prio);
+    else sh7021_assert_irq(vector, highest_prio);
 }
 
 static void update_irq1_effective(int allow_falling_edge) {
@@ -55,7 +64,7 @@ static void update_irq1_effective(int allow_falling_edge) {
         state.pending_irqs[IRQ_IRQ1] = new_effective;
         state.irq_offs[IRQ_IRQ1] = 0;
     }
-    send_irq_signal();
+    send_irq_signal(allow_falling_edge && !old_effective && new_effective, 0);
 }
 
 void sh7021_ocpm_intc_initialize(void) {
@@ -85,6 +94,12 @@ uint16_t sh7021_ocpm_intc_read16(uint32_t addr) {
     case 0x0E: return state.icr;
     default: return 0;
     }
+}
+
+uint32_t sh7021_ocpm_intc_read32(uint32_t addr) {
+    uint32_t hi = sh7021_ocpm_intc_read16(addr);
+    uint32_t lo = sh7021_ocpm_intc_read16(addr + 2u);
+    return (hi << 16) | lo;
 }
 
 uint8_t sh7021_ocpm_intc_read8(uint32_t addr) {
@@ -136,7 +151,12 @@ void sh7021_ocpm_intc_write16(uint32_t addr, uint16_t value) {
     }
     default: break;
     }
-    if (addr != 0x0E) send_irq_signal();
+    if (addr != 0x0E) send_irq_signal(0, 0);
+}
+
+void sh7021_ocpm_intc_write32(uint32_t addr, uint32_t value) {
+    sh7021_ocpm_intc_write16(addr, (uint16_t)(value >> 16));
+    sh7021_ocpm_intc_write16(addr + 2u, (uint16_t)value);
 }
 
 void sh7021_ocpm_intc_write8(uint32_t addr, uint8_t value) {
@@ -153,20 +173,24 @@ void sh7021_ocpm_intc_write8(uint32_t addr, uint8_t value) {
 }
 
 void sh7021_ocpm_intc_assert_irq(IRQ irq, int vector_offs) {
-    state.pending_irqs[(int)irq] = true;
-    state.irq_offs[(int)irq] = vector_offs;
-    send_irq_signal();
+    int id = (int)irq;
+    int was_pending = source_pending(id);
+    state.pending_irqs[id] = true;
+    state.irq_offs[id] = vector_offs;
+    send_irq_signal(!was_pending, 0);
 }
 
 void sh7021_ocpm_intc_deassert_irq(IRQ irq) {
     state.pending_irqs[(int)irq] = false;
-    send_irq_signal();
+    send_irq_signal(0, 0);
 }
 
 void sh7021_ocpm_intc_pulse_irq(IRQ irq, int vector_offs) {
-    state.edge_pending[(int)irq] = true;
-    state.irq_offs[(int)irq] = vector_offs;
-    send_irq_signal();
+    int id = (int)irq;
+    int was_pending = source_pending(id);
+    state.edge_pending[id] = true;
+    state.irq_offs[id] = vector_offs;
+    send_irq_signal(!was_pending, 0);
 }
 
 void sh7021_ocpm_intc_set_irq1_pin_enabled(int enabled) {
@@ -182,7 +206,7 @@ void sh7021_ocpm_intc_set_irq1_line(int asserted_low) {
 void sh7021_ocpm_intc_acknowledge(void) {
     int id = state.presented_irq;
     if (id >= 0 && id < IRQ_NumIrq) state.edge_pending[id] = false;
-    send_irq_signal();
+    send_irq_signal(0, 1);
 }
 
 uint32_t sh7021_ocpm_intc_state_blob_size(void) { return (uint32_t)sizeof(state); }
@@ -190,6 +214,6 @@ void sh7021_ocpm_intc_get_state_blob(void *dst, uint32_t size) { if (dst && size
 void sh7021_ocpm_intc_set_state_blob(const void *src, uint32_t size) {
     if (src && size == sizeof(state)) {
         memcpy(&state, src, sizeof(state));
-        send_irq_signal();
+        send_irq_signal(0, 0);
     }
 }

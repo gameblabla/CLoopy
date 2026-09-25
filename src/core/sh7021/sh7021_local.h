@@ -14,9 +14,7 @@ typedef struct SH7021CPU {
     uint32_t current_opcode_pc;
     uint8_t in_delay_slot;
     uint8_t sleep_mode;
-    /* SH-1 load-use interlock state.  These two bytes intentionally occupy
-       the padding that used to precede cycles_left, so the raw CPU-state blob
-       size remains unchanged. */
+    /* SH-1 load-use interlock state, serialized explicitly in v2 CPU states. */
     uint8_t load_delay_reg;
     uint8_t load_delay_valid;
     int32_t cycles_left;
@@ -28,14 +26,15 @@ typedef struct SH7021CPU {
 
 extern SH7021CPU sh7021;
 
-/* Idle-loop detection state.  Deliberately kept out of SH7021CPU: the savestate
-   blob is a raw copy of that struct, and this is pure detection state that is
-   rebuilt from scratch every timeslice, so it must neither grow the blob nor be
-   restored from one.  sh7021_bus.c sets these; sh7021_run() consumes them. */
+/* Idle-loop detection state.  Deliberately kept out of the persistent CPU
+   state: this is pure detection state rebuilt from scratch every timeslice, so
+   it must not be serialized or restored.  sh7021_bus.c sets these;
+   sh7021_run() consumes them. */
 extern uint8_t sh7021_idle_wrote_mem;
 extern uint8_t sh7021_idle_unsafe_read;
 
 void sh7021_assert_irq(int vector_id, int prio);
+void sh7021_assert_irq_delayed(int vector_id, int prio);
 void sh7021_irq_check(void);
 void sh7021_block_irq_next(void);
 int sh7021_service_pending_irq(void);

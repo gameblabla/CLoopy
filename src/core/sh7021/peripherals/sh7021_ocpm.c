@@ -48,7 +48,9 @@ uint16_t sh7021_ocpm_io_read16(uint32_t addr) {
 uint32_t sh7021_ocpm_io_read32(uint32_t addr) {
     addr = (addr & 0x1FFu) + 0xE00u;
     if (addr >= DMAC_START && addr < DMAC_END) return sh7021_ocpm_dmac_read32(addr);
+    if (addr >= INTC_START && addr + 3u < INTC_END) return sh7021_ocpm_intc_read32(addr);
     if (addr >= BSC_START && addr < BSC_END) return sh7021_ocpm_bsc_read32(addr);
+    if (sh7021_ocpm_pfc_handles(addr) && sh7021_ocpm_pfc_handles(addr + 2u)) return sh7021_ocpm_pfc_read32(addr);
     LOOPY_DEBUG_PRINTF("[OCPM] read32 %08X\n", addr);
     return 0;
 }
@@ -77,7 +79,9 @@ void sh7021_ocpm_io_write16(uint32_t addr, uint16_t value) {
 void sh7021_ocpm_io_write32(uint32_t addr, uint32_t value) {
     addr = (addr & 0x1FFu) + 0xE00u;
     if (addr >= DMAC_START && addr < DMAC_END) { sh7021_ocpm_dmac_write32(addr, value); return; }
+    if (addr >= INTC_START && addr + 3u < INTC_END) { sh7021_ocpm_intc_write32(addr, value); return; }
     if (addr >= BSC_START && addr < BSC_END) { sh7021_ocpm_bsc_write32(addr, value); return; }
+    if (sh7021_ocpm_pfc_handles(addr) && sh7021_ocpm_pfc_handles(addr + 2u)) { sh7021_ocpm_pfc_write32(addr, value); return; }
     LOOPY_DEBUG_PRINTF("[OCPM] write32 %08X: %08X\n", addr, value);
 }
 

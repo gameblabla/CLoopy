@@ -16,6 +16,7 @@ void cart_sram_commit_check(void);
    themselves (libretro) expose this rather than the config copy. */
 void *cart_get_sram_data(void);
 uint32_t cart_get_sram_size(void);
+int cart_is_present(void);
 uint32_t cart_state_blob_size(void);
 void cart_get_state_blob(void *dst, uint32_t size);
 void cart_set_state_blob(const void *src, uint32_t size);

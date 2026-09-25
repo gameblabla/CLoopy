@@ -106,26 +106,6 @@ void sh7021_ocpm_bsc_initialize(void) {
     state.refresh_last_cpu_ts = -1;
 }
 
-void sh7021_ocpm_bsc_apply_loopy_boot_state(void) {
-    /* The retail Loopy BIOS programs these values at 0x00000480..0x000004A0
-     * before entering cartridge code.  CLoopy intentionally skips that boot
-     * path and starts at 0x0E000480, so seed the same register image here. */
-    state.bcr = normalize_bcr(0x9000u);
-    state.wcr1 = normalize_wcr1(0xb9fdu);
-    state.wcr2 = 0xb9b9u;
-    state.wcr3 = normalize_wcr3(0xa800u);
-    state.dcr = normalize_dcr(0x5d00u);
-    state.pcr = 0x0000u;
-    state.rcr = 0x80u;
-    state.rtcsr = 0x08u;
-    state.rtcsr_read_cmf = 0;
-    state.rtcnt = 0x00u;
-    state.rtcor = 0x7au;
-    state.pcr_read_pef = 0;
-    state.refresh_last_cpu_ts = timing_get_timestamp(TIMING_CPU_TIMER);
-    update_ref_irq();
-}
-
 static uint16_t read16_reg(uint32_t addr) {
     bsc_timer_update();
     switch (addr & 0x1ffu) {

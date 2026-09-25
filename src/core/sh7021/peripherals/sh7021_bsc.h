@@ -3,11 +3,6 @@
 #include <stdint.h>
 
 void sh7021_ocpm_bsc_initialize(void);
-/* Apply the BSC register image established by the Loopy BIOS before it jumps
- * to cartridge startup.  The emulator enters the cartridge directly, so this
- * preserves the hardware-visible post-BIOS bus configuration without changing
- * the SH7021 power-on reset defaults used by the standalone peripheral tests. */
-void sh7021_ocpm_bsc_apply_loopy_boot_state(void);
 uint8_t sh7021_ocpm_bsc_read8(uint32_t addr);
 uint16_t sh7021_ocpm_bsc_read16(uint32_t addr);
 uint32_t sh7021_ocpm_bsc_read32(uint32_t addr);

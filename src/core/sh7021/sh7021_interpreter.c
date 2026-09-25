@@ -1170,20 +1170,46 @@ static void SH7021_UNUSED_FN MULL(uint32_t m, uint32_t n)
 	sh7021.cycles_left--;
 }
 
+static int opcode_is_muls_or_mulu(uint16_t op)
+{
+    if ((op >> 12) != 0x2) return 0;
+    uint16_t low = op & 0x000fu;
+    return low == 0x0eu || low == 0x0fu;
+}
+
+static int opcode_is_sts_macl(uint16_t op)
+{
+    return (op & 0xf0ffu) == 0x001au;
+}
+
+static int peek_opcode(uint32_t addr, uint16_t *op)
+{
+    uint32_t v = 0;
+    if (!sh7021_bus_peek(addr, 2, &v)) return 0;
+    *op = (uint16_t)v;
+    return 1;
+}
+
 /*  MULS    Rm,Rn */
 static void MULS(uint32_t m, uint32_t n)
 {
 	sh7021.macl = (int16_t)sh7021.gpr[n] * (int16_t)sh7021.gpr[m];
-	/* SH-1 16x16 multiply is a multi-cycle instruction; the dispatcher
-	 * charges the base cycle, so add the second cycle here. */
-	sh7021.cycles_left--;
+	uint16_t next = 0;
+	int extra = 2;
+	if (peek_opcode(sh7021.pc, &next) &&
+	    !opcode_is_muls_or_mulu(next) && !opcode_is_sts_macl(next)) extra = 1;
+	sh7021.cycles_left -= extra;
 }
 
 /*  MULU    Rm,Rn */
 static void MULU(uint32_t m, uint32_t n)
 {
 	sh7021.macl = (uint16_t)sh7021.gpr[n] * (uint16_t)sh7021.gpr[m];
-	sh7021.cycles_left--;
+	uint16_t next = 0;
+	int extra = 2;
+	if (peek_opcode(sh7021.pc, &next) &&
+	    !opcode_is_muls_or_mulu(next) && !opcode_is_sts_macl(next)) extra = 1;
+	sh7021.cycles_left -= extra;
 }
 
 /*  NEG     Rm,Rn */
@@ -1400,6 +1426,11 @@ static void STSMACH(uint32_t n)
 /*  STS     MACL,Rn */
 static void STSMACL(uint32_t n)
 {
+	/* Reading MACL immediately after MULS/MULU waits for completion. */
+	uint16_t prev = 0;
+	if (sh7021.current_opcode_pc >= 2 &&
+	    peek_opcode(sh7021.current_opcode_pc - 2u, &prev) && opcode_is_muls_or_mulu(prev))
+		sh7021.cycles_left--;
 	sh7021.gpr[n] = sh7021.macl;
 	sh7021_block_irq_next();
 }
@@ -1907,12 +1938,13 @@ static void RTE(void) {
        corrupt their PR/stack restore path. */
     sh7021.sr = sh7021_bus_read32(sh7021.ea) & SH_FLAGS;
     sh7021.gpr[15] += 4;
-    sh7021.cycles_left -= 3;
-    /* External level requests are not re-sampled until execution has resumed
-       after RTE.  The delay slot is executed by the current run-loop
-       iteration, and this one-boundary inhibit lets the restored stream make
-       one instruction of forward progress before a still-active IRQ can be
-       accepted again. */
+    sh7021.cycles_left -= 1;
+    /* SH-1 documents an interrupt-inhibit interval around RTE in addition to
+       the delayed branch itself.  Model that at the first instruction boundary
+       after the return has landed.  This is also essential for a level-sensed
+       external IRQ: while the pin remains active, hardware executes one
+       instruction at the restored PC before the request can be accepted again,
+       rather than re-entering the handler forever at the return boundary. */
     sh7021_block_irq_next();
 }
 
@@ -1924,7 +1956,12 @@ static void TRAPA(uint32_t i) {
     sh7021.gpr[15] -= 4;
     sh7021_bus_write32(sh7021.gpr[15], sh7021.pc);
     sh7021.pc = sh7021_bus_read32(sh7021.ea);
-    sh7021.cycles_left -= 7;
+    sh7021.cycles_left -= 9;
+
+    /* An RTE-only trap handler overlaps one cycle of refill on hardware. */
+    uint16_t first = 0;
+    if (peek_opcode(sh7021.pc, &first) && first == 0x002bu)
+        sh7021.cycles_left += 1;
 }
 
 static void ILLEGAL(void) {

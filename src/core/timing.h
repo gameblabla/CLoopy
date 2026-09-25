@@ -43,6 +43,7 @@ int timing_save_state(FILE *file);
 int timing_load_state(FILE *file);
 uint32_t timing_state_blob_size(void);
 int timing_get_state_blob(void *dst, uint32_t size);
+int timing_validate_state_blob(const void *src, uint32_t size);
 int timing_set_state_blob(const void *src, uint32_t size);
 
 #endif
