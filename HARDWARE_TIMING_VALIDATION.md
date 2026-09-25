@@ -49,3 +49,11 @@ A deterministic gameplay comparison used the same input sequence on `edb5286` an
 That result is within LoopyDOOM's own README estimate of roughly 8-15 fps on hardware. No cartridge/CPU timing was relaxed to obtain it. The supplied MiSTer SCI implementation was used as the behavioral reference; the ITU model was not changed because the existing ITU/raster hardware probes remain on target and the Doom slowdown reproduced specifically through SCI status polling.
 
 A dedicated `sh7021_serial_test` now gates reset register values, TDRE/TEND semantics, 31250-baud 8N1 frame timing, double buffering, TXI, TX-DMA acknowledgement, TE abort/idle behavior, synchronous-mode programming, and the historical serial save-state chunk size.
+
+## SCI DMA sound regression follow-up
+
+The SCI timing change in `d8e4783` exposed a DMAC re-entrancy bug in the new serial DMA acknowledgement path. When a TX DMA write was acknowledged, SCI could immediately move TDR into the shift register and reassert TXI/DREQ. `sh7021_ocpm_dmac_send_dreq()` services requests synchronously, so the same DMA channel could be entered again before its source address and transfer count had advanced. The nested transfer therefore resent the same source byte. Retail MIDI streams were corrupted even though their byte counts were unchanged.
+
+The DMAC now commits its source/destination address and transfer-count progress before acknowledging the peripheral request. A dedicated serial/DMAC test reproduces the nested TXI1 request and verifies that the second transfer observes the next source byte; the test fails on `d8e4783` and passes with the fix.
+
+With the supplied Little Romance ROM, 1,800 video frames produce 1,934 SCI1 transmitted MIDI bytes. The fixed byte stream is byte-for-byte identical to `edb5286`; `d8e4783` instead starts `C0 C0 90 ...` where the pre-regression/fixed stream starts `C0 60 90 ...`, with similar duplicated bytes later in the stream. The supplied Doom ROM produces an identical 600-frame CPU profile before and after this DMAC ordering fix, confirming that the SCI status/timing performance fix remains intact.

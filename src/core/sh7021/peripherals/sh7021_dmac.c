@@ -133,20 +133,27 @@ static void channel_start_transfer(Channel *chan) {
         while (chan->transfer_size && channel_request_valid(chan)) {
             uint16_t value = sh7021_bus_dma_read16(chan->src_addr, single);
             sh7021_bus_dma_write16(chan->dst_addr, value, single);
-            channel_ack_peripheral_dreq(chan);
+            /* Advance the channel before acknowledging a peripheral request.
+               SCI can immediately reassert TXI when TDR moves into the shift
+               register, and send_dreq() services that request synchronously.
+               Acknowledge-last prevents that nested service from seeing and
+               retransferring the same source address/count. */
             chan->src_addr += (uint32_t)src_step;
             chan->dst_addr += (uint32_t)dst_step;
             chan->transfer_size--;
+            channel_ack_peripheral_dreq(chan);
             if (!chan->ctrl.is_burst) break;
         }
     } else {
         while (chan->transfer_size && channel_request_valid(chan)) {
             uint8_t value = sh7021_bus_dma_read8(chan->src_addr, single);
             sh7021_bus_dma_write8(chan->dst_addr, value, single);
-            channel_ack_peripheral_dreq(chan);
+            /* See the 16-bit path above: a peripheral ack may synchronously
+               re-enter the DMAC through a newly asserted request. */
             chan->src_addr += (uint32_t)src_step;
             chan->dst_addr += (uint32_t)dst_step;
             chan->transfer_size--;
+            channel_ack_peripheral_dreq(chan);
             if (!chan->ctrl.is_burst) break;
         }
     }

@@ -58,14 +58,14 @@ SDL3_OBJ := $(patsubst src/%.c,$(BUILD_DIR)/%.sdl3.o,$(CORE_SRC) $(SDL3_SRC))
 LIBRETRO_OBJ := $(patsubst src/%.c,$(BUILD_DIR)/%.lr.o,$(CORE_SRC) $(LIBRETRO_SRC))
 DEP := $(HEADLESS_OBJ:.o=.d) $(SDL3_OBJ:.o=.d) $(LIBRETRO_OBJ:.o=.d)
 
-.PHONY: all headless sdl3 sdl3-check libretro wanwan-oki-rom test test-cpu test-interlock test-disasm test-bsc test-pfc test-serial test-video-timing test-state test-io test-mouse test-printer test-cmdlist clean run-smoke run-smoke-debug
+.PHONY: all headless sdl3 sdl3-check libretro wanwan-oki-rom test test-cpu test-interlock test-disasm test-bsc test-pfc test-serial test-serial-dma test-video-timing test-state test-io test-mouse test-printer test-cmdlist clean run-smoke run-smoke-debug
 all: $(WANWAN_OKI_ROM_PREREQ) headless
 headless: $(WANWAN_OKI_ROM_PREREQ) $(TARGET_HEADLESS)
 sdl3: $(WANWAN_OKI_ROM_PREREQ) $(TARGET_SDL3)
 sdl3-check: $(WANWAN_OKI_ROM_PREREQ) $(SDL3_OBJ)
 libretro: $(WANWAN_OKI_ROM_PREREQ) $(TARGET_LIBRETRO)
 
-test: test-cpu test-interlock test-disasm test-bsc test-pfc test-serial test-video-timing test-state test-io test-mouse test-printer test-cmdlist
+test: test-cpu test-interlock test-disasm test-bsc test-pfc test-serial test-serial-dma test-video-timing test-state test-io test-mouse test-printer test-cmdlist
 
 
 test-cpu: $(BUILD_DIR)/tests/sh7021_sign_extension_test
@@ -85,6 +85,9 @@ test-pfc: $(BUILD_DIR)/tests/sh7021_pfc_test
 
 test-serial: $(BUILD_DIR)/tests/sh7021_serial_test
 	./$(BUILD_DIR)/tests/sh7021_serial_test
+
+test-serial-dma: $(BUILD_DIR)/tests/sh7021_serial_dma_test
+	./$(BUILD_DIR)/tests/sh7021_serial_dma_test
 
 test-video-timing: $(BUILD_DIR)/tests/video_timing_test
 	./$(BUILD_DIR)/tests/video_timing_test
@@ -128,6 +131,10 @@ $(BUILD_DIR)/tests/sh7021_pfc_test: tests/sh7021_pfc_test.c src/core/sh7021/peri
 $(BUILD_DIR)/tests/sh7021_serial_test: tests/sh7021_serial_test.c src/core/sh7021/peripherals/sh7021_serial.c src/core/sh7021/peripherals/sh7021_serial.h src/core/timing.c src/core/timing.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/sh7021_serial_test.c src/core/sh7021/peripherals/sh7021_serial.c src/core/timing.c -o $@
+
+$(BUILD_DIR)/tests/sh7021_serial_dma_test: tests/sh7021_serial_dma_test.c src/core/sh7021/peripherals/sh7021_serial.c src/core/sh7021/peripherals/sh7021_serial.h src/core/sh7021/peripherals/sh7021_dmac.c src/core/sh7021/peripherals/sh7021_dmac.h src/core/timing.c src/core/timing.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/sh7021_serial_dma_test.c src/core/sh7021/peripherals/sh7021_serial.c src/core/sh7021/peripherals/sh7021_dmac.c src/core/timing.c -o $@
 
 $(BUILD_DIR)/tests/video_timing_test: tests/video_timing_test.c src/video/video_timing.c src/video/video_timing.h src/core/timing.h
 	@mkdir -p $(dir $@)
