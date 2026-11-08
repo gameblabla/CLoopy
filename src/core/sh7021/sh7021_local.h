@@ -13,6 +13,9 @@ typedef struct SH7021CPU {
     uint32_t m_delay;
     uint32_t current_opcode_pc;
     uint8_t in_delay_slot;
+    /* Transient instruction state, not part of the savestate format. */
+    uint8_t in_execute;
+    uint8_t data_address_error;
     uint8_t sleep_mode;
     /* SH-1 load-use interlock state, serialized explicitly in v2 CPU states. */
     uint8_t load_delay_reg;
@@ -39,6 +42,7 @@ void sh7021_irq_check(void);
 void sh7021_block_irq_next(void);
 int sh7021_service_pending_irq(void);
 void sh7021_raise_exception(int vector_id);
+void sh7021_raise_exception_to(int vector_id, uint32_t return_pc);
 void sh7021_raise_slot_illegal(void);
 void sh7021_set_pc(uint32_t new_pc);
 void sh7021_set_sr(uint32_t new_sr);

@@ -36,6 +36,7 @@ static uint16_t read_screen(int index, int x)
 		return vdp.backdrops[index];
 	}
 
+    if (vdp.snow_palette_valid[x]) return vdp.snow_palette_rgb[x];
 	return read_palette(pal_color);
 }
 
@@ -189,9 +190,15 @@ static void draw_bg(int index, int screen_y)
 			tile_y = tile_size_mask - tile_y;
 		}
 
-		tile_index += tile_y & ~0x7;
-		tile_index += tile_x >> 3;
-		uint32_t offs = (tile_x & 0x7) + ((tile_y & 0x7) * 0x08) + (tile_index << 6);
+		/* Character VRAM is an eight-character-wide grid, not a linear
+		   sequence of characters.  Large BG cells wrap the character column
+		   independently of the row (e.g. column 7 -> column 0), on the real
+		   VDP.  Both the 8-bit and 4-bit character spaces use this layout. */
+		int split_rows = is_8bit ? 0 : ((vdp.tilebase & 0x7F) << 1);
+		uint32_t char_row = ((tile_index >> 3) + split_rows + (tile_y >> 3)) & 0xFFu;
+		uint32_t char_col = (tile_index + (tile_x >> 3)) & 7u;
+		uint32_t offs = (char_row << 9) | (char_col << 6) |
+		                ((uint32_t)(tile_y & 7) << 3) | (uint32_t)(tile_x & 7);
 
 		uint8_t tile_data;
 		if (is_8bit)
@@ -201,7 +208,6 @@ static void draw_bg(int index, int screen_y)
 		else
 		{
 			offs >>= 1;
-			offs += vdp.tilebase << 9;
 			tile_data = vdp.tile[(tilemap.data_start + offs) & 0xFFFF];
 			if (tile_x & 0x1)
 			{
@@ -212,6 +218,8 @@ static void draw_bg(int index, int screen_y)
 				tile_data >>= 4;
 			}
 		}
+
+		if (vdp.snow_tile_blank[screen_x]) tile_data = 0;
 
 		//0 is transparent, no matter if it's 4-bit or 8-bit
 		if (!tile_data)
@@ -290,23 +298,19 @@ static uint8_t read_bitmap_pixel(const BitmapLayout *layout, const VDPBitmapRegs
 	int data_x = (regs->scrollx + layer_x) & width_mask;
 	int data_y = (regs->scrolly + layer_y) & height_mask;
 
-	uint32_t split_pixel_offset = 0;
-	if (layout->split_y)
-	{
-		split_pixel_offset = (uint32_t)(regs->scrolly & 0x100) * (uint32_t)layout->vram_width;
-	}
-	if (layout->split_x)
-	{
-		split_pixel_offset = (uint32_t)(regs->scrollx & 0x100) * (uint32_t)layout->vram_height;
-	}
-
-	uint32_t addr = split_pixel_offset + (uint32_t)data_x + ((uint32_t)data_y * (uint32_t)layout->vram_width);
+	/* The VDP stores every bitmap row in 256 bytes.  For 4bpp, a
+	   256/512-pixel layer occupies 128/256 bytes of a row and SPLIT_X
+	   selects the second half of it.  The split bit is part of the pixel
+	   address, not an extra 128KB bank offset. */
+	if (layout->split_y) data_y |= regs->scrolly & 0x100;
+	if (layout->split_x) data_x |= regs->scrollx & 0x100;
+	uint32_t addr = (uint32_t)data_y * 256u;
 	if (layout->is_8bit)
 	{
-		return vdp.bitmap[addr & 0x1FFFF];
+		return vdp.bitmap[(addr + (uint32_t)data_x) & 0x1FFFF];
 	}
 
-	addr >>= 1;
+	addr += (uint32_t)data_x >> 1;
 	uint8_t data = vdp.bitmap[addr & 0x1FFFF];
 	return (data_x & 0x1) ? (uint8_t)(data & 0x0F) : (uint8_t)(data >> 4);
 }
@@ -321,7 +325,10 @@ static void prepare_bitmap_line(int index, int y)
 		return;
 	}
 
-	VDPBitmapRegs* regs = &vdp.bitmap_regs[index];
+    VDPBitmapRegs regs_copy = vdp.bitmap_regs[index];
+    regs_copy.scrollx = vdp.bitmap_line_scrollx[index];
+    regs_copy.scrolly = vdp.bitmap_frame_scrolly[index];
+    VDPBitmapRegs *regs = &regs_copy;
 	int screen_y0 = sign9(regs->screeny);
 	int layer_y = y - screen_y0;
 	int end_y = regs->h & 0xFF;
@@ -363,6 +370,7 @@ static void prepare_bitmap_line(int index, int y)
 
 		vdp.bitmap_linebuf[index][layer_x] = data;
 	}
+    vdp.bitmap_regs[index].buffered_color = regs->buffered_color;
 	vdp.bitmap_linebuf_valid[index] = 1;
 }
 
@@ -394,7 +402,7 @@ static void draw_bitmap(int index, int y)
 
 	VDPBitmapRegs* regs = &vdp.bitmap_regs[index];
 	BitmapLayout layout = get_bitmap_layout();
-	int screen_x0 = sign9(regs->screenx);
+	int screen_x0 = sign9(vdp.bitmap_frame_screenx[index]);
 	int pair_index = index >> 1;
 	int output_mode = vdp.layer_ctrl.bitmap_screen_mode[pair_index];
 
@@ -539,7 +547,6 @@ static void draw_obj(int index, int screen_y)
 			else
 			{
 				offs >>= 1;
-				offs += vdp.tilebase << 9;
 				tile_data = vdp.tile[(tilemap.data_start + offs) & 0xFFFF];
 				if (tile_x & 0x1)
 				{
@@ -638,9 +645,11 @@ static void draw_layers(int y)
 	}
 }
 
+static int seg_x0, seg_x1;
+
 static void draw_color_math(int y, bool half)
 {
-	for (int x = 0; x < VIDEO_DISPLAY_WIDTH; x++)
+	for (int x = seg_x0; x < seg_x1; x++)
 	{
 		uint16_t input_a = 0, input_b = 0;
 		if (vdp.color_prio.output_screen_a)
@@ -696,7 +705,7 @@ static void draw_color_math(int y, bool half)
 
 static void draw_screen_overlay(int y, bool screen_b_prio)
 {
-	for (int x = 0; x < VIDEO_DISPLAY_WIDTH; x++)
+	for (int x = seg_x0; x < seg_x1; x++)
 	{
 		uint16_t output;
 		if (screen_b_prio)
@@ -706,9 +715,9 @@ static void draw_screen_overlay(int y, bool screen_b_prio)
 			   backdrop, so it must not be used as an opaque top layer. */
 			output = vdp.color_prio.output_screen_a ? read_screen(0, x) : 0;
 			if (vdp.color_prio.output_screen_b &&
-				!vdp.color_prio.screen_b_backdrop_only &&
-				vdp.screens[1][x])
+				(vdp.color_prio.screen_b_backdrop_only || vdp.screens[1][x]))
 			{
+				/* SBCOL forces B's backdrop as an opaque top screen. */
 				output = read_screen(1, x);
 			}
 		}
@@ -730,7 +739,7 @@ static void draw_screen_overlay(int y, bool screen_b_prio)
 static void draw_single_screen(int y, int screen)
 {
 	bool enabled = screen ? vdp.color_prio.output_screen_b : vdp.color_prio.output_screen_a;
-	for (int x = 0; x < VIDEO_DISPLAY_WIDTH; x++)
+	for (int x = seg_x0; x < seg_x1; x++)
 	{
 		write_blended_output_pixel(x, y, enabled ? read_screen(screen, x) : 0);
 	}
@@ -740,7 +749,7 @@ static void draw_blend_hires_interleave(int y)
 {
 	/* Megadoc BLEND_MODE 3 "Hi-res / interleave": screens A and B at
 	   half-pixel width, 512 pixels starting with screen A. */
-	for (int x = 0; x < VIDEO_DISPLAY_WIDTH; x++)
+	for (int x = seg_x0; x < seg_x1; x++)
 	{
 		uint16_t input_a = vdp.color_prio.output_screen_a ? read_screen(0, x) : 0;
 		uint16_t input_b = vdp.color_prio.output_screen_b ? read_screen(1, x) : 0;
@@ -750,7 +759,7 @@ static void draw_blend_hires_interleave(int y)
 
 static void draw_black_scanline(int y)
 {
-	for (int x = 0; x < VIDEO_DISPLAY_WIDTH; x++)
+	for (int x = seg_x0; x < seg_x1; x++)
 	{
 		write_blended_output_pixel(x, y, 0);
 	}
@@ -816,6 +825,24 @@ static void display_capture(int y)
     }
 }
 
+/* Resolve palette/backdrop colours only for the selected horizontal span. */
+static void compose_color_segment(int y)
+{
+    for (int x = seg_x0; x < seg_x1; x++) {
+        write_color(vdp.screen_output[0], x, y, read_screen(0, x));
+        write_color(vdp.screen_output[1], x, y, read_screen(1, x));
+    }
+    switch (vdp.dispmode) {
+    case 0x00: draw_color_math(y, false); break;
+    case 0x01: draw_color_math(y, true); break;
+    case 0x02: draw_single_screen(y, 0); break;
+    case 0x03: draw_blend_hires_interleave(y); break;
+    case 0x04: draw_screen_overlay(y, true); break;
+    case 0x05: draw_screen_overlay(y, false); break;
+    default: draw_black_scanline(y); break;
+    }
+}
+
 void video_renderer_draw_scanline(int y)
 {
 	//Set both screens A and B to transparent (backdrop shows through).
@@ -828,41 +855,28 @@ void video_renderer_draw_scanline(int y)
 
 	draw_layers(y);
 
-	//Fetch the screen colors
-	for (int x = 0; x < VIDEO_DISPLAY_WIDTH; x++)
-	{
-		uint16_t color = read_screen(0, x);
-		write_color(vdp.screen_output[0], x, y, color);
-
-		color = read_screen(1, x);
-		write_color(vdp.screen_output[1], x, y, color);
-	}
-
-	//Draw the screens to the display output buffer
-	switch (vdp.dispmode)
-	{
-	case 0x00:
-		draw_color_math(y, false);
-		break;
-	case 0x01:
-		draw_color_math(y, true);
-		break;
-	case 0x02:
-		draw_single_screen(y, 0);
-		break;
-	case 0x03:
-		draw_blend_hires_interleave(y);
-		break;
-	case 0x04:
-		draw_screen_overlay(y, true);
-		break;
-	case 0x05:
-		draw_screen_overlay(y, false);
-		break;
-	default:
-		draw_black_scanline(y);
-		break;
-	}
+    seg_x0 = 0;
+    seg_x1 = VIDEO_DISPLAY_WIDTH;
+    if (vdp.color_split_count) {
+        uint8_t palette_now[VIDEO_PALETTE_SIZE];
+        uint16_t backdrops_now[2];
+        memcpy(palette_now, vdp.palette, sizeof(palette_now));
+        memcpy(backdrops_now, vdp.backdrops, sizeof(backdrops_now));
+        for (int i=0; i<vdp.color_split_count; i++) {
+            const VDPColorSplit *split = &vdp.color_splits[i];
+            seg_x1 = split->x_end;
+            if (seg_x1 > VIDEO_DISPLAY_WIDTH) seg_x1 = VIDEO_DISPLAY_WIDTH;
+            memcpy(vdp.palette, split->palette, sizeof(vdp.palette));
+            memcpy(vdp.backdrops, split->backdrops, sizeof(vdp.backdrops));
+            compose_color_segment(y);
+            seg_x0 = seg_x1;
+        }
+        memcpy(vdp.palette, palette_now, sizeof(vdp.palette));
+        memcpy(vdp.backdrops, backdrops_now, sizeof(vdp.backdrops));
+    }
+    seg_x1 = VIDEO_DISPLAY_WIDTH;
+    compose_color_segment(y);
+    seg_x0 = 0;
 
 	if (vdp.capture_enable && y == vdp.capture_ctrl.scanline)
 	{

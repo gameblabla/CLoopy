@@ -2,6 +2,7 @@
 #include "common/bswp.h"
 #include "core/sh7021/peripherals/sh7021_ocpm.h"
 #include "core/sh7021/peripherals/sh7021_bsc.h"
+#include "core/sh7021/peripherals/sh7021_dmac.h"
 #include "core/sh7021/sh7021_local.h"
 #include "core/loopy_io.h"
 #include "core/timing.h"
@@ -316,6 +317,18 @@ static void apply_internal_peripheral_wait(uint32_t raw_addr, int bytes) {
     prof_note_wait(raw_addr, cycles);
 }
 
+/* OCRAM shares the SH-1.s internal 32-bit fetch/data port.  An access
+ * from cartridge code occupies a separate bus slot; internal code has a
+ * free data slot at 4n but contends with the 32-bit fetch at 4n+2. */
+static void apply_oram_data_wait(uint32_t raw_addr) {
+    if (!sh7021.in_execute || (raw_addr & 0x0F000000u) != 0x0F000000u) return;
+    uint32_t code_area = sh7021.current_opcode_pc & 0x0F000000u;
+    if (code_area == 0x0E000000u) {
+        sh7021.cycles_left--;
+        prof_note_wait(raw_addr, 1);
+    }
+}
+
 static void apply_vdp_mmio_wait(uint32_t raw_addr, uint32_t translated_addr, int bytes, int write) {
     (void)write;
     uint32_t area = raw_addr & 0x0F000000u;
@@ -520,76 +533,144 @@ uint16_t sh7021_bus_fetch16(uint32_t addr) {
     return sh7021_bus_read16(raw_addr);
 }
 
+/* Area 1 connects to the same DRAM as area 9, but only D0..D7 are
+ * wired. Both byte lanes read the low byte of each 16-bit word; a word
+ * read duplicates that byte. Word writes drive the low lane only. */
+static int is_area1(uint32_t raw_addr) {
+    return (raw_addr & 0x0F000000u) == 0x01000000u;
+}
+
+static uint8_t *area1_low_byte(uint32_t translated_addr) {
+    uint32_t low_addr = translated_addr | 1u;
+    uint8_t *page = sh7021.pagetable[low_addr >> 12];
+    return page ? page + (low_addr & 0xFFFu) : NULL;
+}
+
 uint8_t sh7021_bus_read8(uint32_t addr) {
     uint32_t raw_addr = addr;
     prof_note_access(raw_addr, 1, 0);
+    if (sh7021.in_execute) sh7021_ocpm_dmac_note_cpu_transfer(1);
     addr = translate_addr(addr);
+    if (is_area1(raw_addr)) {
+        uint8_t *p = area1_low_byte(addr);
+        return p ? *p : 0;
+    }
     if (video_bus_is_vdp_addr(raw_addr, addr)) { idle_note_read(addr, 1); apply_vdp_wait(raw_addr, addr, 1, 0); return video_bus_read8(raw_addr); }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
     if (mem) { apply_workram_wait(raw_addr, 1, 0); apply_cart_wait(raw_addr, 1, 0, 0); return mem[addr & 0xFFFu]; }
     idle_note_read(addr, 1);
     apply_vdp_mmio_wait(raw_addr, addr, 1, 0);
     apply_internal_peripheral_wait(raw_addr, 1);
+    apply_oram_data_wait(raw_addr);
     MMIO_ACCESS(read8, addr);
 }
+/* A CPU word/long access on SH7021 has an address error if unaligned.
+ * The external transaction still takes place at the aligned-down address
+ * before vector 9 is entered.  Exception stacking, inspection and DMA must
+ * not generate an additional CPU fault. */
+static uint32_t align_cpu_data_access(uint32_t addr, uint32_t mask) {
+    if ((addr & mask) && sh7021.in_execute) sh7021.data_address_error = 1;
+    return addr & ~mask;
+}
+
 uint16_t sh7021_bus_read16(uint32_t addr) {
+    addr = align_cpu_data_access(addr, 1u);
     uint32_t raw_addr = addr;
     prof_note_access(raw_addr, 2, 0);
+    if (sh7021.in_execute) sh7021_ocpm_dmac_note_cpu_transfer(2);
     addr = translate_addr(addr);
+    if (is_area1(raw_addr)) {
+        uint8_t *p = area1_low_byte(addr);
+        uint8_t b = p ? *p : 0;
+        return (uint16_t)(b << 8 | b);
+    }
     if (video_bus_is_vdp_addr(raw_addr, addr)) { idle_note_read(addr, 2); apply_vdp_wait(raw_addr, addr, 2, 0); return video_bus_read16(raw_addr); }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
     if (mem) { apply_workram_wait(raw_addr, 2, 0); apply_cart_wait(raw_addr, 2, 0, 0); uint16_t value; memcpy(&value, mem + (addr & 0xFFFu), 2); return common_bswp16(value); }
     idle_note_read(addr, 2);
     apply_vdp_mmio_wait(raw_addr, addr, 2, 0);
     apply_internal_peripheral_wait(raw_addr, 2);
+    apply_oram_data_wait(raw_addr);
     MMIO_ACCESS(read16, addr);
 }
 uint32_t sh7021_bus_read32(uint32_t addr) {
+    addr = align_cpu_data_access(addr, 3u);
     uint32_t raw_addr = addr;
     prof_note_access(raw_addr, 4, 0);
+    if (sh7021.in_execute) sh7021_ocpm_dmac_note_cpu_transfer(4);
     addr = translate_addr(addr);
+    if (is_area1(raw_addr)) {
+        uint8_t *hi = area1_low_byte(addr);
+        uint8_t *lo = area1_low_byte(addr + 2u);
+        uint32_t a = hi ? *hi : 0, b = lo ? *lo : 0;
+        return a << 24 | a << 16 | b << 8 | b;
+    }
     if (video_bus_is_vdp_addr(raw_addr, addr)) { idle_note_read(addr, 4); apply_vdp_wait(raw_addr, addr, 4, 0); return video_bus_read32(raw_addr); }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
     if (mem) { apply_workram_wait(raw_addr, 4, 0); apply_cart_wait(raw_addr, 4, 0, 0); uint32_t value; memcpy(&value, mem + (addr & 0xFFFu), 4); return common_bswp32(value); }
     idle_note_read(addr, 4);
     apply_vdp_mmio_wait(raw_addr, addr, 4, 0);
     apply_internal_peripheral_wait(raw_addr, 4);
+    apply_oram_data_wait(raw_addr);
     MMIO_ACCESS(read32, addr);
 }
 void sh7021_bus_write8(uint32_t addr, uint8_t value) {
     sh7021_idle_wrote_mem = 1;
     uint32_t raw_addr = addr;
     prof_note_access(raw_addr, 1, 1);
+    if (sh7021.in_execute) sh7021_ocpm_dmac_note_cpu_transfer(1);
     addr = translate_addr(addr);
+    if (is_area1(raw_addr)) {
+        uint8_t *p = area1_low_byte(addr);
+        if (p) *p = value;
+        return;
+    }
     if (video_bus_is_vdp_addr(raw_addr, addr)) { apply_vdp_wait(raw_addr, addr, 1, 1); video_bus_write8(raw_addr, value); return; }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
     if (mem) { apply_workram_wait(raw_addr, 1, 1); apply_cart_wait(raw_addr, 1, 1, 0); mem[addr & 0xFFFu] = value; return; }
     apply_vdp_mmio_wait(raw_addr, addr, 1, 1);
     apply_internal_peripheral_wait(raw_addr, 1);
+    apply_oram_data_wait(raw_addr);
     MMIO_ACCESS(write8, addr, value);
 }
 void sh7021_bus_write16(uint32_t addr, uint16_t value) {
     sh7021_idle_wrote_mem = 1;
+    addr = align_cpu_data_access(addr, 1u);
     uint32_t raw_addr = addr;
     prof_note_access(raw_addr, 2, 1);
+    if (sh7021.in_execute) sh7021_ocpm_dmac_note_cpu_transfer(2);
     addr = translate_addr(addr);
+    if (is_area1(raw_addr)) {
+        uint8_t *p = area1_low_byte(addr);
+        if (p) *p = (uint8_t)value;
+        return;
+    }
     if (video_bus_is_vdp_addr(raw_addr, addr)) { apply_vdp_wait(raw_addr, addr, 2, 1); video_bus_write16(raw_addr, value); return; }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
     if (mem) { apply_workram_wait(raw_addr, 2, 1); apply_cart_wait(raw_addr, 2, 1, 0); value = common_bswp16(value); memcpy(mem + (addr & 0xFFFu), &value, 2); return; }
     apply_vdp_mmio_wait(raw_addr, addr, 2, 1);
     apply_internal_peripheral_wait(raw_addr, 2);
+    apply_oram_data_wait(raw_addr);
     MMIO_ACCESS(write16, addr, value);
 }
 void sh7021_bus_write32(uint32_t addr, uint32_t value) {
     sh7021_idle_wrote_mem = 1;
+    addr = align_cpu_data_access(addr, 3u);
     uint32_t raw_addr = addr;
     prof_note_access(raw_addr, 4, 1);
+    if (sh7021.in_execute) sh7021_ocpm_dmac_note_cpu_transfer(4);
     addr = translate_addr(addr);
+    if (is_area1(raw_addr)) {
+        uint8_t *p = area1_low_byte(addr);
+        if (p) *p = (uint8_t)value;
+        return;
+    }
     if (video_bus_is_vdp_addr(raw_addr, addr)) { apply_vdp_wait(raw_addr, addr, 4, 1); video_bus_write32(raw_addr, value); return; }
     uint8_t *mem = sh7021.pagetable[addr >> 12];
     if (mem) { apply_workram_wait(raw_addr, 4, 1); apply_cart_wait(raw_addr, 4, 1, 0); value = common_bswp32(value); memcpy(mem + (addr & 0xFFFu), &value, 4); return; }
     apply_vdp_mmio_wait(raw_addr, addr, 4, 1);
     apply_internal_peripheral_wait(raw_addr, 4);
+    apply_oram_data_wait(raw_addr);
     MMIO_ACCESS(write32, addr, value);
 }
 
@@ -643,20 +724,48 @@ static void note_dma_access(uint32_t addr, int bytes, int write, int single_addr
 
 uint8_t sh7021_bus_dma_read8(uint32_t addr, int single_address_mode) {
     note_dma_access(addr, 1, 0, single_address_mode);
-    return sh7021_bus_read8(addr);
+    uint8_t value = sh7021_bus_read8(addr);
+    if ((addr & 0x0F000000u) == 0x0E000000u) {
+        sh7021.cycles_left--; /* ROM DMA read cannot overlap CPU's fetch slot. */
+        prof_note_wait(addr, 1);
+    }
+    return value;
 }
 
 uint16_t sh7021_bus_dma_read16(uint32_t addr, int single_address_mode) {
     note_dma_access(addr, 2, 0, single_address_mode);
-    return sh7021_bus_read16(addr);
+    uint16_t value = sh7021_bus_read16(addr);
+    if ((addr & 0x0F000000u) == 0x0E000000u) {
+        sh7021.cycles_left--;
+        prof_note_wait(addr, 1);
+    }
+    return value;
+}
+
+/* DMA bus ownership is not overlapped with CPU execution: a transfer to
+ * work RAM requires the extra write-recovery slot; a VDP bitmap or tile
+ * destination takes one or three extra arbitration slots respectively. */
+static void charge_dma_destination(uint32_t addr) {
+    uint32_t area = addr & 0x0F000000u;
+    int extra = 0;
+    if (area == 0x01000000u || area == 0x09000000u) extra = 1;
+    if (area == 0x04000000u || area == 0x0C000000u) {
+        uint32_t off = addr & 0x003FFFFFu;
+        if (off < 0x40000u) extra = 1;
+        else if (off < 0x50000u) extra = 3;
+    }
+    sh7021.cycles_left -= extra;
+    prof_note_wait(addr, extra);
 }
 
 void sh7021_bus_dma_write8(uint32_t addr, uint8_t value, int single_address_mode) {
     note_dma_access(addr, 1, 1, single_address_mode);
     sh7021_bus_write8(addr, value);
+    charge_dma_destination(addr);
 }
 
 void sh7021_bus_dma_write16(uint32_t addr, uint16_t value, int single_address_mode) {
     note_dma_access(addr, 2, 1, single_address_mode);
     sh7021_bus_write16(addr, value);
+    charge_dma_destination(addr);
 }

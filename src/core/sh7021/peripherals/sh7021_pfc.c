@@ -20,11 +20,18 @@ static PFCState state;
 
 #define PA13_MODE_MASK 0x0C00u
 #define PA13_MODE_IRQ1 0x0400u
+#define PA12_MODE_MASK 0x0300u
+#define PA12_MODE_IRQ0 0x0100u
+#define PA14_MODE_MASK 0x3000u
+#define PA14_MODE_IRQ2 0x1000u
 #define PA8_MASK 0x0100u
 #define PA8_MODE_BREQ 0x0001u
 
 static void update_irq1_pin_mode(void) {
     sh7021_ocpm_intc_set_irq1_pin_enabled((state.pacr1 & PA13_MODE_MASK) == PA13_MODE_IRQ1);
+    sh7021_ocpm_intc_set_irq0_pin_enabled((state.pacr1 & PA12_MODE_MASK) == PA12_MODE_IRQ0);
+    sh7021_ocpm_intc_set_irq2_pin_enabled((state.pacr1 & PA14_MODE_MASK) == PA14_MODE_IRQ2);
+    sh7021_ocpm_intc_set_dreq0_pin_enabled((state.pacr1 & PA13_MODE_MASK) == PA13_MODE_MASK);
 }
 
 void sh7021_ocpm_pfc_initialize(void) {
@@ -71,6 +78,12 @@ uint16_t sh7021_ocpm_pfc_read16(uint32_t addr) {
         if (!(state.paior & PA8_MASK) && !(state.pacr1 & PA8_MODE_BREQ)) {
             if (cart_is_present()) raw |= PA8_MASK;
             else raw &= (uint16_t)~PA8_MASK;
+        }
+        /* PA13 is the real raster signal, even when configured as GPIO.
+           Read physical input pins rather than the output latch. */
+        if (!(state.paior & 0x2000u)) {
+            if (sh7021_ocpm_intc_irq1_line_low()) raw &= (uint16_t)~0x2000u;
+            else raw |= 0x2000u;
         }
         return raw;
     }

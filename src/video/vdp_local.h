@@ -9,6 +9,14 @@ typedef struct VDPBitmapRegs {
     uint8_t buffered_color;
 } VDPBitmapRegs;
 
+#define VDP_MAX_COLOR_SPLITS 8
+
+typedef struct VDPColorSplit {
+    int x_end;
+    uint16_t backdrops[2];
+    uint8_t palette[VIDEO_PALETTE_SIZE];
+} VDPColorSplit;
+
 typedef struct VDP {
     uint16_t *bg_output[2];
     uint16_t *bitmap_output[4];
@@ -57,6 +65,18 @@ typedef struct VDP {
     uint16_t bitmap_mem_ctrl;
     uint16_t dma_mask;
     uint16_t dma_value;
+    int color_split_count;
+    VDPColorSplit color_splits[VDP_MAX_COLOR_SPLITS];
+    /* The bitmap fetcher samples scroll X each line and Y/X placement per frame. */
+    uint16_t bitmap_line_scrollx[4];
+    uint16_t bitmap_frame_scrolly[4];
+    uint16_t bitmap_frame_screenx[4];
+    int bitmap_enable_frame[4];
+    /* One scanline of CPU/VDP arbitration effects. Captured with the VDP
+       state so mid-line savestates can resume without losing bus interference. */
+    uint8_t snow_tile_blank[VIDEO_DISPLAY_WIDTH];
+    uint8_t snow_palette_valid[VIDEO_DISPLAY_WIDTH];
+    uint16_t snow_palette_rgb[VIDEO_DISPLAY_WIDTH];
 } VDP;
 
 extern VDP vdp;

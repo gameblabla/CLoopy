@@ -45,6 +45,10 @@ void sh7021_ocpm_intc_pulse_irq(IRQ irq, int vector_offs);
 /* External IRQ1 is routed through PA13.  The PFC controls whether PA13 is in
  * IRQ1 mode; INTC.ICR bit 6 chooses falling-edge versus active-low sense. */
 void sh7021_ocpm_intc_set_irq1_pin_enabled(int enabled);
+void sh7021_ocpm_intc_set_irq0_pin_enabled(int enabled);
+void sh7021_ocpm_intc_set_irq2_pin_enabled(int enabled);
+void sh7021_ocpm_intc_set_dreq0_pin_enabled(int enabled);
+int sh7021_ocpm_intc_irq1_line_low(void);
 void sh7021_ocpm_intc_set_irq1_line(int asserted_low);
 /* Called by the CPU when it accepts the request currently presented by INTC. */
 void sh7021_ocpm_intc_acknowledge(void);

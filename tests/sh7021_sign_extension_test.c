@@ -144,6 +144,30 @@ int main(void) {
     fails += expect_u32("MAC.W saturation sets SH-1 MACH overflow flag", sh7021.mach, 0x00000001u);
     fails += expect_u32("MAC.W positive saturation clamps MACL", sh7021.macl, 0x7fffffffu);
 
+    /* The MAC.W multiplier finishes one cycle after a following STS would
+       otherwise read MACH/MACL.  The measured M6 hardware probe checks this
+       instruction dependency rather than the arithmetic result itself. */
+    reset_cpu();
+    sh7021.current_opcode_pc = 0x0e001002u;
+    sh7021.cycles_left = 10;
+    fake_read16 = 0x410fu;  /* preceding MAC.W @r0+,@r1+ */
+    sh7021.macl = 0x11223344u;
+    sh7021_interpreter_run(0x051au); /* STS MACL,R5 */
+    fails += expect_u32("MAC.W -> STS MACL waits one cycle", (uint32_t)sh7021.cycles_left, 9u);
+    fails += expect_u32("MAC.W -> STS preserves MACL", sh7021.gpr[5], 0x11223344u);
+    reset_cpu();
+    sh7021.current_opcode_pc = 0x0e001002u;
+    sh7021.cycles_left = 10;
+    fake_read16 = 0x0009u;  /* preceding NOP */
+    sh7021_interpreter_run(0x051au);
+    fails += expect_u32("NOP -> STS MACL needs no wait", (uint32_t)sh7021.cycles_left, 10u);
+    reset_cpu();
+    sh7021.current_opcode_pc = 0x0e001002u;
+    sh7021.cycles_left = 10;
+    fake_read16 = 0x410fu;
+    sh7021_interpreter_run(0x050au); /* STS MACH,R5 */
+    fails += expect_u32("MAC.W -> STS MACH waits one cycle", (uint32_t)sh7021.cycles_left, 9u);
+
     /* These encodings are valid on SH-2 but illegal on SH-1/SH7021. */
     fails += expect_illegal_opcode(0x8f00u, "BF/S is illegal on SH-1");
     fails += expect_illegal_opcode(0x8d00u, "BT/S is illegal on SH-1");

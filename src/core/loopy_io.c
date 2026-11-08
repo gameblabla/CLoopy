@@ -1,4 +1,6 @@
 #include "core/loopy_io.h"
+#include "core/timing.h"
+#include "input/input.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -94,6 +96,7 @@ typedef struct LoopyIOState {
     uint8_t mouse_quad_x;
     uint8_t mouse_quad_y;
     uint8_t control_out;
+    int64_t out5_high_since;
     uint8_t control_latch[6];
     unsigned debug_ctrl_reads[3];
     uint16_t debug_ctrl_last[3];
@@ -233,7 +236,7 @@ static void printer_clear_pending_image(LoopyPrinterState *p) {
 
 static void printer_init_defaults(LoopyPrinterState *p) {
     memset(p, 0, sizeof(*p));
-    p->adc_value = 0x147u;
+    p->adc_value = 0x154u;
     p->sensors_enable = 0;
     /* Stock NTSC unit, seal cartridge installed at the documented initial position:
      * SCT=1, OPTO=100, RJMP=1.  ENP is latched by VDP.TRIGGER.PSEN. */
@@ -651,11 +654,14 @@ static void printer_update_sensor_latch(LoopyPrinterState *p) {
 
 static uint16_t printer_adc_for_mux(uint16_t mux) {
     switch (mux & 7u) {
-    case 0: return 0x147u; /* Thermistor: approx 20 C, safely below BIOS warnings. */
-    case 1: return 0x1AFu; /* Head calibration resistor, from measured example. */
-    case 2: return 0x200u; /* Contrast potentiometer centered. */
-    case 3: return 0x3FFu; /* Floating cartridge ADC inputs. */
-    default: return 0x3FFu;
+    /* Typical NTSC console readings from timing-lab's ten-run ranges.
+       These are analog measurements (thermistor, trim and cartridge ADCs),
+       not digital constants; use a plausible value within each range. */
+    case 0: return 0x154u;
+    case 1: return 0x236u;
+    case 2: return 0x206u;
+    case 3: return 0x01Au;
+    default: return 0x01Au;
     }
 }
 
@@ -682,12 +688,13 @@ static uint8_t pad_matrix_row(unsigned row) {
     }
 }
 
-static uint8_t pad_direct_input(void) {
-    uint8_t value = 0;
-    for (unsigned row = 0; row < 6; row++) {
-        if (state.control_out & (1u << row)) value |= pad_matrix_row(row);
-    }
-    return value;
+/* Direct mode does not expose the scanned button matrix.  With a gamepad
+   connected the first two output strobes detect its presence; all six
+   strobes at once do not create an extra high-byte bit. Real-console
+   timing-lab PA reads 0001, not 0101, even after many CPU cycles. */
+static uint16_t pad_direct_input(void) {
+    if (!(state.pad_buttons & PAD_PRESENCE)) return 0;
+    return (state.control_out & 3u) ? 1u : 0u;
 }
 
 static void set_direct_control_out(uint8_t value) {
@@ -695,6 +702,8 @@ static void set_direct_control_out(uint8_t value) {
      * direct output register are ignored for port output and must not arm a
      * hidden direct-mode scanner. */
     if (state.matrix_mode) return;
+    if ((value & 0x20u) && !(state.control_out & 0x20u))
+        state.out5_high_since = timing_get_timestamp(TIMING_CPU_TIMER);
     state.control_out = (uint8_t)(value & 0x3Fu);
 }
 
@@ -766,17 +775,21 @@ uint16_t loopy_io_reg_read16(uint32_t addr) {
     case 0x044:
         return state.printer.head_ctrl;
     case 0x010: {
-        uint16_t v = (uint16_t)control_latch_byte(0) | ((uint16_t)control_latch_byte(1) << 8);
+        uint16_t v = (!state.matrix_mode && !state.mouse_connected)
+            ? pad_direct_input()
+            : (uint16_t)((uint16_t)control_latch_byte(0) | ((uint16_t)control_latch_byte(1) << 8));
         state.debug_ctrl_reads[0]++; state.debug_ctrl_last[0] = v;
         return v;
     }
     case 0x012: {
-        uint16_t v = (uint16_t)control_latch_byte(2) | ((uint16_t)control_latch_byte(3) << 8);
+        uint16_t v = (!state.matrix_mode && !state.mouse_connected) ? 0u
+            : (uint16_t)((uint16_t)control_latch_byte(2) | ((uint16_t)control_latch_byte(3) << 8));
         state.debug_ctrl_reads[1]++; state.debug_ctrl_last[1] = v;
         return v;
     }
     case 0x014: {
-        uint16_t v = (uint16_t)control_latch_byte(4) | ((uint16_t)control_latch_byte(5) << 8);
+        uint16_t v = (!state.matrix_mode && !state.mouse_connected) ? 0u
+            : (uint16_t)((uint16_t)control_latch_byte(4) | ((uint16_t)control_latch_byte(5) << 8));
         state.debug_ctrl_reads[2]++; state.debug_ctrl_last[2] = v;
         return v;
     }
@@ -1127,6 +1140,7 @@ void loopy_io_set_state_blob(const void *src, uint32_t size) {
     state.mouse_quad_x = b.mouse_quad_x;
     state.mouse_quad_y = b.mouse_quad_y;
     state.control_out = b.control_out;
+    state.out5_high_since = timing_get_timestamp(TIMING_CPU_TIMER);
     memcpy(state.control_latch, b.control_latch, sizeof(state.control_latch));
     state.printer.analog_ctrl = b.analog_ctrl;
     state.printer.adc_value = b.adc_value;

@@ -21,11 +21,6 @@ VDP vdp;
 
 #define LINES_PER_FRAME 263
 
-static int cpu_cycles_per_ntsc_line(void)
-{
-    return video_timing_cpu_cycles_per_ntsc_line();
-}
-
 static int cpu_cycles_for_scanline(uint16_t vcount)
 {
     /* 267,970 cycles per 263-line hardware frame while preserving a ~1019
@@ -191,7 +186,7 @@ static void end_hsync(uint64_t param, int cycles_late)
     (void)param;
     (void)cycles_late;
     /* Horizontal blank spans H=257, wrap to -84, then -84..-1.  Release at
-       H=0 so assertion and release use the same raster origin as HCOUNT. */
+       H=0, at the start of active pixels. */
     if (vdp.sync_irq_ctrl.irq1_source == 1) sh7021_ocpm_intc_set_irq1_line(0);
 }
 
@@ -249,13 +244,32 @@ static void inc_vcount(uint64_t param, int cycles_late)
     int64_t now = timing_get_timestamp(TIMING_CPU_TIMER);
     vdp.line_start_timestamp = (uint64_t)(now - cycles_late);
     loopy_io_matrix_scan_vcount(vdp.vcount);
+    /* Capture completes on the configured scanline's trailing H-blank edge,
+       regardless of when TRIGGER was written. It is not a fixed-duration
+       timer from the trigger: a trigger on line 99 to capture line 100
+       waits two boundaries. */
+    int capture_scanline = vdp.capture_enable &&
+                           vdp.vcount == vdp.capture_ctrl.scanline;
 	if (vdp.vcount < vdp.visible_scanlines)
 	{
 		video_renderer_draw_scanline(vdp.vcount);
 	}
+    if (capture_scanline && vdp.irq2_source == 0 &&
+        vdp.irq2_enable_a && vdp.irq2_enable_b && vdp.irq2_enable_c) {
+        sh7021_ocpm_intc_pulse_irq(IRQ_IRQ2, 0);
+    }
+	/* A line's colour changes are consumed by its renderer; start fresh. */
+	vdp.color_split_count = 0;
+    memset(vdp.snow_tile_blank, 0, sizeof(vdp.snow_tile_blank));
+    memset(vdp.snow_palette_valid, 0, sizeof(vdp.snow_palette_valid));
 
 	vdp.vcount++;
-	
+    /* The outgoing line used the previous X scroll. The next line latches
+       the programmed X values at the H=-84 boundary, not at render time. */
+    for (int i = 0; i < 4; i++) {
+        vdp.bitmap_line_scrollx[i] = vdp.bitmap_regs[i].scrollx;
+    }
+
 	//Once we go past the visible region, enter VSYNC
 	if (vdp.vcount == vdp.visible_scanlines)
 	{
@@ -268,11 +282,18 @@ static void inc_vcount(uint64_t param, int cycles_late)
 	{
 		LOOPY_DEBUG_PRINTF("[Video] VSYNC end\n");
 		vdp.vcount = 0;
+        /* Bitmap Y scroll and screen position are frame-latched. */
+        for (int i=0; i<4; i++) {
+            vdp.bitmap_frame_scrolly[i] = vdp.bitmap_regs[i].scrolly;
+            vdp.bitmap_frame_screenx[i] = vdp.bitmap_regs[i].screenx;
+            vdp.bitmap_enable_frame[i] = vdp.layer_ctrl.bitmap_enable[i];
+        }
 		update_irq1_vsync_line();
 	}
 
     const int CYCLES_PER_LINE = cpu_cycles_for_scanline(vdp.vcount);
     int hsync_assert_cycles = CYCLES_PER_LINE - 3 - cycles_late;
+    /* The physical raster signal releases at H=0. */
     int hsync_release_cycles = video_timing_hcount_to_cpu_cycles(VIDEO_NTSC_H_ACTIVE_START) - cycles_late;
     if (hsync_assert_cycles < 1) hsync_assert_cycles = 1;
     if (hsync_release_cycles < 1) hsync_release_cycles = 1;
@@ -480,7 +501,7 @@ static uint16_t vdp_unmapped_read16(uint32_t addr)
 static void vdp_unmapped_write16(uint32_t addr, uint16_t value)
 {
     LOOPY_DEBUG_PRINTF("[Video] unmapped VDP write16 %08X: %04X\n", addr, value);
-    vdp.bus_latch = value;
+    (void)value; /* A write never changes the VDP read-data latch. */
 }
 
 static uint8_t video_bitmap_vram_read8(uint32_t addr)
@@ -565,8 +586,11 @@ bool video_bus_is_vdp_addr(uint32_t raw_addr, uint32_t translated_addr)
 {
     uint32_t area = raw_addr & 0x0F000000u;
     if (area != VIDEO_VDP_AREA_NORMAL && area != VIDEO_VDP_AREA_LOW_MIRROR) return false;
-    if (translated_addr >= LOOPY_IO_BASE_ADDR && translated_addr < LOOPY_IO_END_ADDR) return false;
-    return translated_addr >= VIDEO_VDP_TRANSLATED_START && translated_addr < VIDEO_VDP_TRANSLATED_END;
+    uint32_t vdp_addr = translate_vdp_addr(raw_addr);
+    if (vdp_addr >= LOOPY_IO_BASE_ADDR && vdp_addr < LOOPY_IO_END_ADDR) return false;
+    /* The VDP responds to the full four-megabyte region. Unimplemented
+       addresses are open bus and return the last VDP *read*, not zero. */
+    return vdp_addr >= VIDEO_VDP_TRANSLATED_START && vdp_addr < 0x04400000u;
 }
 
 static bool video_addr_is_bitmap_vram(uint32_t addr)
@@ -579,29 +603,63 @@ static bool video_addr_is_tile_vram(uint32_t addr)
     return addr >= VIDEO_TILE_VRAM_START && addr < VIDEO_TILE_VRAM_END;
 }
 
+/* The bitmap SRAM shares its bus with the VDP. Console measurements show
+   two seven-clock holds in each 20-clock fetch cycle; the fetch windows are
+   anchored to the line boundary, not randomly distributed across accesses.
+   The number and position of bursts depend on bitmap-layer visibility.
+   Keep sub-clock precision so successive CPU phases can have different waits. */
+static int bitmap_burst_hold(int64_t pos, int start, int bursts, int line_cycles)
+{
+    const int64_t sub = 64;
+    int64_t p = pos - (int64_t)start * sub;
+    if (p < 0 || p >= (int64_t)bursts * 20 * sub) return -1;
+    int64_t q = p % (20 * sub);
+    int64_t end;
+    if (q < 7 * sub) end = 7 * sub;
+    else if (q >= 9 * sub && q < 16 * sub) end = 16 * sub;
+    else return 0;
+    int wait = (int)((end - q) * line_cycles / (1365 * sub)) + 1;
+    return wait > 5 ? 5 : wait;
+}
+
+static int bitmap_contention_wait(void)
+{
+    const int64_t sub = 64;
+    int line = vdp.vcount & 0x100u ? (int)vdp.vcount - 0x200 : (int)vdp.vcount;
+    int64_t elapsed = timing_get_timestamp(TIMING_CPU_TIMER) - (int64_t)vdp.line_start_timestamp;
+    int line_cycles = cpu_cycles_for_scanline(vdp.vcount);
+    int64_t pos = elapsed * 1365 * sub / line_cycles;
+    int shown = 0;
+    for (int i = 0; i < 4; i++) shown |= vdp.bitmap_enable_frame[i];
+    int pre_line = line >= -1 && line <= vdp.visible_scanlines - 2;
+    int this_line = line >= 0 && line < vdp.visible_scanlines;
+    int bursts = shown ? 2 : 4;
+    int wait = -1;
+    if (pre_line) wait = bitmap_burst_hold(pos - 1365 * sub, -2, bursts, line_cycles);
+    if (wait < 0 && this_line) wait = bitmap_burst_hold(pos, -2, bursts, line_cycles);
+    if (wait < 0 && this_line && shown) wait = bitmap_burst_hold(pos, 306, 2, line_cycles);
+    return wait < 0 ? 0 : wait;
+}
+
 int video_bus_wait_cycles(uint32_t raw_addr, uint32_t translated_addr, int bytes, bool write)
 {
     if (!video_bus_is_vdp_addr(raw_addr, translated_addr)) return 0;
 
+    translated_addr = translate_vdp_addr(raw_addr);
     int per_word;
     if (write) per_word = 3;
     else if (video_addr_is_bitmap_vram(translated_addr)) per_word = 5;
     else if (video_addr_is_tile_vram(translated_addr)) per_word = 7;
     else per_word = 4;
 
+    if (video_addr_is_bitmap_vram(translated_addr) && (vdp.bitmap_mem_ctrl & 1u))
+        per_word--; /* BM_MEM_CTRL fast-access mode: one less per transfer. */
+
     int transfers = (bytes == 4) ? 2 : 1;
     int cycles = per_word * transfers;
 
-    /* Active display occasionally owns bitmap VRAM for a slot.  Use raster
-       phase only, so this is deterministic and needs no save-state field. */
-    if (video_addr_is_bitmap_vram(translated_addr) && vdp.vcount < vdp.visible_scanlines) {
-        uint32_t slot = (uint32_t)timing_get_timestamp(TIMING_CPU_TIMER);
-        slot ^= slot >> 7;
-        slot *= 0x9E3779B1u;
-        slot ^= slot >> 16;
-        unsigned threshold = write ? 47u : 25u;
-        if ((slot & 0xFFu) < threshold) cycles += transfers;
-    }
+    if (video_addr_is_bitmap_vram(translated_addr))
+        cycles += bitmap_contention_wait() * transfers;
 
     if (is_low_vdp_mirror(raw_addr)) cycles += bytes;
     return cycles;
@@ -710,6 +768,36 @@ static void vdp_route_write32(uint32_t addr, uint32_t value)
     vdp_unmapped_write16((addr + 2u) & ~1u, (uint16_t)value);
 }
 
+/* CPU accesses compete with the pixel pipeline's tile fetches. These marks
+   affect only the line being drawn; the VRAM contents themselves remain intact.
+   The display fetches a map entry, then two 4-pixel words ahead of the beam. */
+static void snow_access(uint32_t translated_addr, uint32_t value, bool read, int bytes)
+{
+    if (vdp.vcount >= (uint16_t)vdp.visible_scanlines ||
+        (!vdp.layer_ctrl.bg_enable[0] && !vdp.layer_ctrl.bg_enable[1])) return;
+    const int tile = video_addr_is_tile_vram(translated_addr);
+    const int pal = translated_addr >= VIDEO_PALETTE_START && translated_addr < VIDEO_PALETTE_END;
+    if (!tile && !(pal && read)) return;
+    int h = (int)(int16_t)(video_current_hcount() << 7) >> 7;
+    if (h < -12 || h >= VIDEO_DISPLAY_WIDTH) return;
+    if (tile) {
+        int phase = h & 7;
+        if (phase >= 3 && phase <= 6) return;
+        int x = (h + 10) & ~7;
+        int count = (phase == 2 || phase == 7) ? 4 : 8;
+        for (int i=0; i<count; i++) {
+            if (x+i >= 0 && x+i < VIDEO_DISPLAY_WIDTH)
+                vdp.snow_tile_blank[x+i] = 1;
+        }
+    } else if (pal) {
+        int x = h + 1;
+        if (x >= 0 && x < VIDEO_DISPLAY_WIDTH) {
+            vdp.snow_palette_valid[x] = 1;
+            vdp.snow_palette_rgb[x] = (uint16_t)(bytes == 1 ? (value << 8) : value);
+        }
+    }
+}
+
 uint8_t video_bus_read8(uint32_t raw_addr)
 {
     uint32_t addr = translate_vdp_addr(raw_addr);
@@ -722,6 +810,7 @@ uint8_t video_bus_read8(uint32_t raw_addr)
         result = vdp_route_read8(addr);
         vdp.bus_latch = (uint16_t)((addr & 1u) ? ((vdp.bus_latch & 0xFF00u) | result) : (((uint16_t)result << 8) | (vdp.bus_latch & 0x00FFu)));
     }
+    snow_access(addr, result, true, 1);
     return result;
 }
 
@@ -735,6 +824,7 @@ uint16_t video_bus_read16(uint32_t raw_addr)
         result = vdp_route_read16(addr & ~1u);
         vdp.bus_latch = result;
     }
+    snow_access(addr, result, true, 2);
     return result;
 }
 
@@ -748,43 +838,43 @@ uint32_t video_bus_read32(uint32_t raw_addr)
         result = vdp_route_read32(addr & ~1u);
         vdp.bus_latch = (uint16_t)result;
     }
+    snow_access(addr, result >> 16, true, 4);
     return result;
 }
 
 void video_bus_write8(uint32_t raw_addr, uint8_t value)
 {
     uint32_t addr = translate_vdp_addr(raw_addr);
+    snow_access(addr, value, false, 1);
     if (is_low_vdp_mirror(raw_addr)) {
         uint16_t bus_value = (uint16_t)value; /* Upper byte is electrically undefined on the 8-bit mirror. */
         vdp_route_write16(addr & ~1u, bus_value);
-        vdp.bus_latch = bus_value;
     } else {
         vdp_route_write8(addr, value);
-        vdp.bus_latch = (uint16_t)((addr & 1u) ? ((vdp.bus_latch & 0xFF00u) | value) : (((uint16_t)value << 8) | (vdp.bus_latch & 0x00FFu)));
     }
 }
 
 void video_bus_write16(uint32_t raw_addr, uint16_t value)
 {
     uint32_t addr = translate_vdp_addr(raw_addr);
+    if (!is_low_vdp_mirror(raw_addr)) snow_access(addr, value, false, 2);
     if (is_low_vdp_mirror(raw_addr)) {
         video_bus_write8(raw_addr, (uint8_t)(value >> 8));
         video_bus_write8(raw_addr + 1u, (uint8_t)value);
     } else {
         vdp_route_write16(addr & ~1u, value);
-        vdp.bus_latch = value;
     }
 }
 
 void video_bus_write32(uint32_t raw_addr, uint32_t value)
 {
     uint32_t addr = translate_vdp_addr(raw_addr);
+    if (!is_low_vdp_mirror(raw_addr)) snow_access(addr, value >> 16, false, 4);
     if (is_low_vdp_mirror(raw_addr)) {
         video_bus_write16(raw_addr, (uint16_t)(value >> 16));
         video_bus_write16(raw_addr + 2u, (uint16_t)value);
     } else {
         vdp_route_write32(addr & ~1u, value);
-        vdp.bus_latch = (uint16_t)value;
     }
 }
 
@@ -807,19 +897,46 @@ uint32_t video_palette_read32(uint32_t addr)
 	return common_bswp32(value);
 }
 
+/* A palette or backdrop write becomes visible a few quarter-pixels after
+ * the CPU write's HCOUNT. Retain the OLD colours up to that position,
+ * because scanlines are rendered at their end rather than incrementally. */
+static void split_line_colors(int offset_quarters)
+{
+    if (vdp.vcount >= vdp.visible_scanlines ||
+        vdp.color_split_count >= VDP_MAX_COLOR_SPLITS) return;
+    int64_t elapsed = (int64_t)timing_get_timestamp(TIMING_CPU_TIMER) -
+                      (int64_t)vdp.line_start_timestamp;
+    int line_cycles = cpu_cycles_for_scanline(vdp.vcount);
+    if (line_cycles <= 0) return;
+    /* VDP HCOUNT runs -84..257, with 1365 VDP clocks per line. */
+    int64_t pos_q = -84 * 4 + elapsed * 1365 * 4 / (4 * line_cycles) + offset_quarters;
+    if (pos_q <= 0) return;
+    int x = (int)(pos_q / 4);
+    if (x > VIDEO_DISPLAY_WIDTH) x = VIDEO_DISPLAY_WIDTH;
+    if (vdp.color_split_count &&
+        vdp.color_splits[vdp.color_split_count-1].x_end >= x) return;
+    VDPColorSplit *split = &vdp.color_splits[vdp.color_split_count++];
+    split->x_end = x;
+    memcpy(split->backdrops, vdp.backdrops, sizeof(split->backdrops));
+    memcpy(split->palette, vdp.palette, sizeof(split->palette));
+}
+
 void video_palette_write8(uint32_t addr, uint8_t value)
 {
+	split_line_colors(6);
 	vdp.palette[addr & 0x1FF] = value;
 }
 
 void video_palette_write16(uint32_t addr, uint16_t value)
 {
+	split_line_colors(6);
 	value = common_bswp16(value);
 	memcpy(&vdp.palette[addr & 0x1FF], &value, 2);
 }
 
 void video_palette_write32(uint32_t addr, uint32_t value)
 {
+	split_line_colors(6);
 	value = common_bswp32(value);
 	memcpy(&vdp.palette[addr & 0x1FF], &value, 4);
 }
@@ -1028,6 +1145,9 @@ uint16_t video_ctrl_read16(uint32_t addr)
 		return video_current_hcount();
 	case 0x004:
 		return vdp.vcount;
+	case 0x006: /* TRIGGER and SYNC_IRQ_CTRL are write-only. */
+	case 0x008:
+		return vdp.bus_latch;
 	default:
 		LOOPY_DEBUG_PRINTF("[Video] unmapped read16 %04X\n", addr);
 		return 0;
@@ -1066,12 +1186,12 @@ void video_ctrl_write16(uint32_t addr, uint16_t value)
 			if (value & 0x01)
 			{
 				vdp.capture_enable = true;
-				if (vdp.irq2_source == 0) schedule_irq2_ready(cpu_cycles_per_ntsc_line());
+                /* Capture IRQ2 is raised when the selected line is rendered. */
 			}
 			if (value & 0x02)
 			{
 				loopy_io_trigger_adc();
-				if (vdp.irq2_source == 1) schedule_irq2_ready(32);
+				if (vdp.irq2_source == 1) schedule_irq2_ready(266); /* conversion plus emulated CPU/VDP synchronizer latency */
 			}
 			if (value & 0x04)
 			{
@@ -1346,9 +1466,11 @@ void video_display_write16(uint32_t addr, uint16_t value)
 		break;
 	case 0x006:
 		//Note the reversed order!
+		split_line_colors(-2);
 		vdp.backdrops[1] = value;
 		break;
 	case 0x008:
+		split_line_colors(-2);
 		vdp.backdrops[0] = value;
 		break;
 	case 0x00A:
@@ -1581,9 +1703,27 @@ typedef struct VDPStateBlob {
     uint16_t bitmap_mem_ctrl;
     uint16_t dma_mask;
     uint16_t dma_value;
+    int color_split_count;
+    VDPColorSplit color_splits[VDP_MAX_COLOR_SPLITS];
+    uint16_t bitmap_line_scrollx[4];
+    uint16_t bitmap_frame_scrolly[4];
+    uint16_t bitmap_frame_screenx[4];
+    int bitmap_enable_frame[4];
+    /* Pending external-memory bus interference for a line in progress. */
+    uint8_t snow_tile_blank[VIDEO_DISPLAY_WIDTH];
+    uint8_t snow_palette_valid[VIDEO_DISPLAY_WIDTH];
+    uint16_t snow_palette_rgb[VIDEO_DISPLAY_WIDTH];
 } VDPStateBlob;
 
 uint32_t video_state_blob_size(void) { return (uint32_t)sizeof(VDPStateBlob); }
+
+int video_state_compatible_legacy_size(uint32_t size) {
+    /* Both sizes are from released states, not arbitrary undersized blobs.
+       The previous layout ended after the four bitmap visibility latches. */
+    const size_t v3_end = offsetof(VDPStateBlob, snow_tile_blank);
+    const uint32_t v3_size = (uint32_t)((v3_end + 7u) & ~(size_t)7u);
+    return size == 204200u || size == v3_size;
+}
 
 void video_get_state_blob(void *dst, uint32_t size) {
     if (!dst || size != sizeof(VDPStateBlob)) return;
@@ -1637,6 +1777,15 @@ void video_get_state_blob(void *dst, uint32_t size) {
     b->bitmap_mem_ctrl = vdp.bitmap_mem_ctrl;
     b->dma_mask = vdp.dma_mask;
     b->dma_value = vdp.dma_value;
+    b->color_split_count = vdp.color_split_count;
+    memcpy(b->color_splits, vdp.color_splits, sizeof(b->color_splits));
+    memcpy(b->bitmap_line_scrollx, vdp.bitmap_line_scrollx, sizeof(b->bitmap_line_scrollx));
+    memcpy(b->bitmap_frame_scrolly, vdp.bitmap_frame_scrolly, sizeof(b->bitmap_frame_scrolly));
+    memcpy(b->bitmap_frame_screenx, vdp.bitmap_frame_screenx, sizeof(b->bitmap_frame_screenx));
+    memcpy(b->bitmap_enable_frame, vdp.bitmap_enable_frame, sizeof(b->bitmap_enable_frame));
+    memcpy(b->snow_tile_blank, vdp.snow_tile_blank, sizeof(b->snow_tile_blank));
+    memcpy(b->snow_palette_valid, vdp.snow_palette_valid, sizeof(b->snow_palette_valid));
+    memcpy(b->snow_palette_rgb, vdp.snow_palette_rgb, sizeof(b->snow_palette_rgb));
     memcpy(dst, b, sizeof(*b));
 }
 
@@ -1657,6 +1806,26 @@ void video_set_state_blob(const void *src, uint32_t size) {
         memcpy(newp + new_bitmap + VIDEO_BITMAP_VRAM_SIZE,
                oldp + old_bitmap + VIDEO_BITMAP_VRAM_SIZE,
                VDP_STATE_BLOB_LEGACY_SIZE - old_bitmap - VIDEO_BITMAP_VRAM_SIZE);
+        src = legacy_expand_storage;
+        size = (uint32_t)sizeof(VDPStateBlob);
+    }
+    /* Save states from before colour splitting remain loadable. */
+    /* Exact serialized sizes include tail padding (uint64_t alignment).
+       The offsets alone are not necessarily the previous sizeof(struct). */
+    const size_t previous_size = 0x30D48u;
+    const size_t pre_snow_size = offsetof(VDPStateBlob, snow_tile_blank);
+    const size_t pre_snow_blob_size = (pre_snow_size + 7u) & ~(size_t)7u;
+    const size_t pre_bitmap_enable_size = offsetof(VDPStateBlob, bitmap_enable_frame);
+    /* Older v2 C structs have four bytes of tail padding from the 64-bit
+       timestamp; their sizeof is not the last member's end offset. */
+    const size_t pre_bitmap_enable_blob_size = (pre_bitmap_enable_size + 7u) & ~(size_t)7u;
+    const size_t previous_splits_size = offsetof(VDPStateBlob, bitmap_line_scrollx);
+    int legacy_bitmap_enable = size < pre_snow_size;
+    if (size == previous_size || size == previous_splits_size ||
+        size == pre_bitmap_enable_size || size == pre_bitmap_enable_blob_size ||
+        size == pre_snow_blob_size) {
+        memset(legacy_expand_storage, 0, sizeof(legacy_expand_storage));
+        memcpy(legacy_expand_storage, src, size);
         src = legacy_expand_storage;
         size = (uint32_t)sizeof(VDPStateBlob);
     }
@@ -1711,6 +1880,20 @@ void video_set_state_blob(const void *src, uint32_t size) {
     vdp.bitmap_mem_ctrl = b->bitmap_mem_ctrl;
     vdp.dma_mask = b->dma_mask;
     vdp.dma_value = b->dma_value;
+    vdp.color_split_count = b->color_split_count;
+    if (vdp.color_split_count < 0 || vdp.color_split_count > VDP_MAX_COLOR_SPLITS)
+        vdp.color_split_count = 0;
+    memcpy(vdp.snow_tile_blank, b->snow_tile_blank, sizeof(vdp.snow_tile_blank));
+    memcpy(vdp.snow_palette_valid, b->snow_palette_valid, sizeof(vdp.snow_palette_valid));
+    memcpy(vdp.snow_palette_rgb, b->snow_palette_rgb, sizeof(vdp.snow_palette_rgb));
+    memcpy(vdp.color_splits, b->color_splits, sizeof(vdp.color_splits));
+    memcpy(vdp.bitmap_line_scrollx, b->bitmap_line_scrollx, sizeof(vdp.bitmap_line_scrollx));
+    memcpy(vdp.bitmap_frame_scrolly, b->bitmap_frame_scrolly, sizeof(vdp.bitmap_frame_scrolly));
+    memcpy(vdp.bitmap_frame_screenx, b->bitmap_frame_screenx, sizeof(vdp.bitmap_frame_screenx));
+    if (legacy_bitmap_enable)
+        memcpy(vdp.bitmap_enable_frame, vdp.layer_ctrl.bitmap_enable, sizeof(vdp.bitmap_enable_frame));
+    else
+        memcpy(vdp.bitmap_enable_frame, b->bitmap_enable_frame, sizeof(vdp.bitmap_enable_frame));
     if (vdp.sync_irq_ctrl.irq1_source == 0) update_irq1_vsync_line();
     else sh7021_ocpm_intc_set_irq1_line(0);
 }

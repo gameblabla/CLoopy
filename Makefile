@@ -58,14 +58,14 @@ SDL3_OBJ := $(patsubst src/%.c,$(BUILD_DIR)/%.sdl3.o,$(CORE_SRC) $(SDL3_SRC))
 LIBRETRO_OBJ := $(patsubst src/%.c,$(BUILD_DIR)/%.lr.o,$(CORE_SRC) $(LIBRETRO_SRC))
 DEP := $(HEADLESS_OBJ:.o=.d) $(SDL3_OBJ:.o=.d) $(LIBRETRO_OBJ:.o=.d)
 
-.PHONY: all headless sdl3 sdl3-check libretro wanwan-oki-rom test test-cpu test-interlock test-disasm test-bsc test-pfc test-serial test-serial-dma test-video-timing test-state test-io test-mouse test-printer test-cmdlist clean run-smoke run-smoke-debug
+.PHONY: all headless sdl3 sdl3-check libretro wanwan-oki-rom test test-cpu test-interlock test-disasm test-bsc test-pfc test-serial test-serial-dma test-timer test-video-timing test-state test-io test-mouse test-printer test-cmdlist clean run-smoke run-smoke-debug
 all: $(WANWAN_OKI_ROM_PREREQ) headless
 headless: $(WANWAN_OKI_ROM_PREREQ) $(TARGET_HEADLESS)
 sdl3: $(WANWAN_OKI_ROM_PREREQ) $(TARGET_SDL3)
 sdl3-check: $(WANWAN_OKI_ROM_PREREQ) $(SDL3_OBJ)
 libretro: $(WANWAN_OKI_ROM_PREREQ) $(TARGET_LIBRETRO)
 
-test: test-cpu test-interlock test-disasm test-bsc test-pfc test-serial test-serial-dma test-video-timing test-state test-io test-mouse test-printer test-cmdlist
+test: test-cpu test-interlock test-disasm test-bsc test-pfc test-serial test-serial-dma test-timer test-video-timing test-state test-io test-mouse test-printer test-cmdlist
 
 
 test-cpu: $(BUILD_DIR)/tests/sh7021_sign_extension_test
@@ -88,6 +88,9 @@ test-serial: $(BUILD_DIR)/tests/sh7021_serial_test
 
 test-serial-dma: $(BUILD_DIR)/tests/sh7021_serial_dma_test
 	./$(BUILD_DIR)/tests/sh7021_serial_dma_test
+
+test-timer: $(BUILD_DIR)/tests/sh7021_timer_flag_test
+	./$(BUILD_DIR)/tests/sh7021_timer_flag_test
 
 test-video-timing: $(BUILD_DIR)/tests/video_timing_test
 	./$(BUILD_DIR)/tests/video_timing_test
@@ -136,6 +139,10 @@ $(BUILD_DIR)/tests/sh7021_serial_dma_test: tests/sh7021_serial_dma_test.c src/co
 	@mkdir -p $(dir $@)
 	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/sh7021_serial_dma_test.c src/core/sh7021/peripherals/sh7021_serial.c src/core/sh7021/peripherals/sh7021_dmac.c src/core/timing.c -o $@
 
+$(BUILD_DIR)/tests/sh7021_timer_flag_test: tests/sh7021_timer_flag_test.c src/core/sh7021/peripherals/sh7021_timers.c src/core/sh7021/peripherals/sh7021_timers.h src/core/timing.c src/core/timing.h
+	@mkdir -p $(dir $@)
+	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/sh7021_timer_flag_test.c src/core/sh7021/peripherals/sh7021_timers.c src/core/timing.c -o $@
+
 $(BUILD_DIR)/tests/video_timing_test: tests/video_timing_test.c src/video/video_timing.c src/video/video_timing.h src/core/timing.h
 	@mkdir -p $(dir $@)
 	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/video_timing_test.c src/video/video_timing.c -o $@
@@ -164,17 +171,17 @@ $(TARGET_HEADLESS): $(WANWAN_OKI_ROM_PREREQ) $(HEADLESS_OBJ)
 $(TARGET_SDL3): $(WANWAN_OKI_ROM_PREREQ) $(SDL3_OBJ)
 	$(CC) $(LDFLAGS) -o $@ $(SDL3_OBJ) $(LDLIBS) $(SDL3_LIBS)
 
-$(BUILD_DIR)/tests/io_controller_mode_test: tests/io_controller_mode_test.c src/core/loopy_io.c src/core/loopy_io.h src/input/input.h src/common/log.h
+$(BUILD_DIR)/tests/io_controller_mode_test: tests/io_controller_mode_test.c src/core/loopy_io.c src/core/timing.c src/core/loopy_io.h src/input/input.h src/common/log.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/io_controller_mode_test.c src/core/loopy_io.c -o $@
+	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/io_controller_mode_test.c src/core/loopy_io.c src/core/timing.c -o $@
 
-$(BUILD_DIR)/tests/io_mouse_counter_test: tests/io_mouse_counter_test.c src/core/loopy_io.c src/core/loopy_io.h src/common/log.h
+$(BUILD_DIR)/tests/io_mouse_counter_test: tests/io_mouse_counter_test.c src/core/loopy_io.c src/core/timing.c src/core/loopy_io.h src/common/log.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/io_mouse_counter_test.c src/core/loopy_io.c -o $@
+	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/io_mouse_counter_test.c src/core/loopy_io.c src/core/timing.c -o $@
 
-$(BUILD_DIR)/tests/printer_png_test: tests/printer_png_test.c src/core/loopy_io.c src/core/loopy_io.h src/common/log.h
+$(BUILD_DIR)/tests/printer_png_test: tests/printer_png_test.c src/core/loopy_io.c src/core/timing.c src/core/loopy_io.h src/common/log.h
 	@mkdir -p $(dir $@)
-	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/printer_png_test.c src/core/loopy_io.c -o $@
+	$(CC) $(CSTD) $(CPPFLAGS) $(CFLAGS) $(WARNFLAGS) tests/printer_png_test.c src/core/loopy_io.c src/core/timing.c -o $@
 
 $(BUILD_DIR)/tests/cmdlist_roundtrip_test: tests/cmdlist_roundtrip_test.c src/frontend/cmdlist.c src/frontend/cmdlist.h
 	@mkdir -p $(dir $@)

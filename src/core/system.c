@@ -11,6 +11,7 @@
 #include "sound/sound.h"
 #include "video/video.h"
 #include <stdint.h>
+#include <stdbool.h>
 
 void system_initialize(const ConfigSystemInfo *config) {
     memory_initialize(&config->bios_rom);
@@ -179,13 +180,14 @@ int system_load_state_from_buffer(const void *src, uint32_t size) {
     if ((uint64_t)chunk_count > (uint64_t)(end - p) / 8u) return -1;
 
     const uint8_t *chunk_data[STATE_CHUNK_COUNT];
+    uint32_t chunk_sizes[STATE_CHUNK_COUNT] = {0};
     uint8_t seen[STATE_CHUNK_COUNT];
     memset(chunk_data, 0, sizeof(chunk_data));
     memset(seen, 0, sizeof(seen));
 
     /* Pass 1: validate the complete container without changing emulator state.
        Unknown IDs are forward-skippable; every current ID is mandatory, unique,
-       and must have exactly the size this format version defines. */
+       and must have a recognized, explicitly migratable size. */
     for (uint32_t i = 0; i < chunk_count; i++) {
         char id[4];
         uint32_t chunk_size = 0;
@@ -193,9 +195,17 @@ int system_load_state_from_buffer(const void *src, uint32_t size) {
         if ((size_t)(end - p) < chunk_size) return -1;
         int idx = find_chunk_index(id);
         if (idx >= 0) {
-            if (seen[idx] || state_chunks[idx].size_fn() != chunk_size) return -1;
+            /* Accept exact prior timer, VDP and DMA layouts; never accept
+               arbitrary truncated chunks as a legacy state. */
+            bool compatible_legacy =
+                (memcmp(id, "TMRS", 4) == 0 && chunk_size == 336u) ||
+                (memcmp(id, "VDP ", 4) == 0 && video_state_compatible_legacy_size(chunk_size)) ||
+                (memcmp(id, "DMAC", 4) == 0 &&
+                 chunk_size == sh7021_ocpm_dmac_legacy_state_blob_size());
+            if (seen[idx] || (state_chunks[idx].size_fn() != chunk_size && !compatible_legacy)) return -1;
             seen[idx] = 1;
             chunk_data[idx] = p;
+            chunk_sizes[idx] = chunk_size;
         }
         p += chunk_size;
     }
@@ -210,7 +220,7 @@ int system_load_state_from_buffer(const void *src, uint32_t size) {
 
     /* Pass 2: now that the whole state is known-good, restore it. */
     for (uint32_t i = 0; i < STATE_CHUNK_COUNT; i++)
-        state_chunks[i].set_fn(chunk_data[i], state_chunks[i].size_fn());
+        state_chunks[i].set_fn(chunk_data[i], chunk_sizes[i]);
     if (timing_set_state_blob(timing_data, timing_size) != 0) return -1;
     return 0;
 }

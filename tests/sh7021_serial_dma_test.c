@@ -4,6 +4,7 @@
 #include "core/timing.h"
 #include <assert.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -13,9 +14,17 @@ static uint8_t dma_writes[8];
 static int dma_write_count;
 static uint8_t tx_bytes[8];
 static int tx_count;
+static uint8_t dma_irq_level[4];
 
-void sh7021_ocpm_intc_assert_irq(IRQ irq, int offs) { (void)irq; (void)offs; }
-void sh7021_ocpm_intc_deassert_irq(IRQ irq) { (void)irq; }
+void sh7021_ocpm_intc_assert_irq(IRQ irq, int offs) {
+    (void)offs;
+    if (irq >= IRQ_DMAC0 && irq <= IRQ_DMAC3)
+        dma_irq_level[irq - IRQ_DMAC0] = 1;
+}
+void sh7021_ocpm_intc_deassert_irq(IRQ irq) {
+    if (irq >= IRQ_DMAC0 && irq <= IRQ_DMAC3)
+        dma_irq_level[irq - IRQ_DMAC0] = 0;
+}
 
 uint8_t sh7021_bus_dma_read8(uint32_t addr, int single) {
     (void)single;
@@ -31,10 +40,11 @@ uint16_t sh7021_bus_dma_read16(uint32_t addr, int single) {
 
 void sh7021_bus_dma_write8(uint32_t addr, uint8_t value, int single) {
     (void)single;
-    assert(addr == 0x2000u);
+    assert(addr == 0x2000u || addr == 0x3000u);
     assert(dma_write_count < (int)sizeof(dma_writes));
     dma_writes[dma_write_count++] = value;
-    sh7021_ocpm_serial_write8(0x0Bu, value); /* SCI1 TDR */
+    if (addr == 0x2000u)
+        sh7021_ocpm_serial_write8(0x0Bu, value); /* SCI1 TDR */
 }
 
 void sh7021_bus_dma_write16(uint32_t addr, uint16_t value, int single) {
@@ -91,7 +101,80 @@ int main(void) {
     assert(tx_count == 3);
     assert(memcmp(tx_bytes, expected, sizeof(expected)) == 0);
 
+    /* External DREQ0 channel 1 in edge-request mode must perform exactly one
+       byte transfer per falling edge, not a continuous transfer while low. */
+    sh7021_ocpm_dmac_initialize();
+    dma_source[4] = 0x42u;
+    dma_source[5] = 0x69u;
+    sh7021_ocpm_dmac_write32(0x10, 0x00001004u);
+    sh7021_ocpm_dmac_write32(0x14, 0x00003000u);
+    sh7021_ocpm_dmac_write16(0x1A, 2);
+    sh7021_ocpm_dmac_write16(0x1E, 0x1021u); /* external, DREQ select, source increment */
+    sh7021_ocpm_dmac_write16(0x08, 0x0001u);
+    assert(dma_write_count == 3);
+    sh7021_ocpm_dmac_dreq0(1, 1);
+    assert(dma_write_count == 4 && dma_writes[3] == 0x42u);
+    sh7021_ocpm_dmac_dreq0(1, 0);
+    assert(dma_write_count == 4); /* no repeated level transfer */
+    sh7021_ocpm_dmac_dreq0(0, 0);
+    sh7021_ocpm_dmac_dreq0(1, 1);
+    assert(dma_write_count == 5 && dma_writes[4] == 0x69u);
+    assert(sh7021_ocpm_dmac_read16(0x1A) == 0u);
+
+    /* Auto DREQ must not transfer inside the channel-enable write. It
+       starts after the measured delay, with the CPU resuming between
+       cycle-steal units. In-flight transfers must survive savestates. */
+    sh7021_ocpm_dmac_initialize();
+    dma_write_count = 0;
+    dma_source[0] = 0x11u;
+    dma_source[1] = 0x22u;
+    sh7021_ocpm_dmac_write32(0x00, 0x00001000u);
+    sh7021_ocpm_dmac_write32(0x04, 0x00003000u);
+    sh7021_ocpm_dmac_write16(0x0A, 2);
+    sh7021_ocpm_dmac_write16(0x0E, 0x1C01u); /* auto, byte, cycle-steal, source++ */
+    sh7021_ocpm_dmac_write16(0x08, 1);
+    assert(sh7021_ocpm_dmac_busy() && dma_write_count == 0);
+    assert(!sh7021_ocpm_dmac_run(0, NULL));
+    run_cycles(4);
+    assert(!sh7021_ocpm_dmac_run(0, NULL));
+    run_cycles(1);
+    assert(sh7021_ocpm_dmac_run(0, NULL));
+    assert(dma_write_count == 1 && dma_writes[0] == 0x11u);
+    assert(!sh7021_ocpm_dmac_run(0, NULL)); /* needs CPU bus access */
+
+    uint32_t saved_size = sh7021_ocpm_dmac_state_blob_size();
+    uint8_t *saved = (uint8_t *)malloc(saved_size);
+    assert(saved);
+    sh7021_ocpm_dmac_get_state_blob(saved, saved_size);
+    sh7021_ocpm_dmac_cpu_accessed(1);
+    assert(sh7021_ocpm_dmac_run(0, NULL));
+    assert(dma_write_count == 2 && dma_writes[1] == 0x22u);
+    assert(!sh7021_ocpm_dmac_busy());
+    sh7021_ocpm_dmac_set_state_blob(saved, saved_size);
+    assert(sh7021_ocpm_dmac_busy() && sh7021_ocpm_dmac_read16(0x0A) == 1u);
+    sh7021_ocpm_dmac_cpu_accessed(1);
+    assert(sh7021_ocpm_dmac_run(0, NULL));
+    assert(dma_write_count == 3 && dma_writes[2] == 0x22u);
+    assert(!sh7021_ocpm_dmac_busy());
+    free(saved);
+
+    /* On SH7021, the DEI interrupt is the level TE && IE, not a pulse
+       emitted only when the final DMA unit moves. IE may be set after TE. */
+    assert(!dma_irq_level[0]);
+    sh7021_ocpm_dmac_write16(0x0E, 0x1C07u); /* Enable IE after TE */
+    assert(dma_irq_level[0]);
+    assert((sh7021_ocpm_dmac_read16(0x0E) & 0x2u) != 0);
+    sh7021_ocpm_dmac_write16(0x0E, 0x1C03u); /* Disable IE, preserve TE */
+    assert(!dma_irq_level[0]);
+    sh7021_ocpm_dmac_write16(0x0E, 0x1C07u);
+    assert(dma_irq_level[0]);
+    /* The documented TE clearing sequence is read CHCR then write TE=0. */
+    (void)sh7021_ocpm_dmac_read16(0x0E);
+    sh7021_ocpm_dmac_write16(0x0E, 0x1C05u);
+    assert(!dma_irq_level[0]);
+    assert((sh7021_ocpm_dmac_read16(0x0E) & 0x2u) == 0);
+
     timing_shutdown();
-    puts("sh7021 serial/dma reentrancy test passed");
+    puts("sh7021 serial/DMA, raster DREQ and automatic cycle-steal tests passed");
     return 0;
 }

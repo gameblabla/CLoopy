@@ -6,6 +6,7 @@
 
 static int nar_high;
 static int irq1_pin_enabled;
+static int irq0_pin_enabled, irq2_pin_enabled, dreq0_pin_enabled, raster_line_low;
 static uint16_t last_portb_old, last_portb_new;
 static int cart_present = 1;
 
@@ -20,6 +21,10 @@ void sound_cart_portb_write(uint16_t old_value, uint16_t new_value) {
     last_portb_new = new_value;
 }
 void sh7021_ocpm_intc_set_irq1_pin_enabled(int enabled) { irq1_pin_enabled = enabled != 0; }
+void sh7021_ocpm_intc_set_irq0_pin_enabled(int enabled) { irq0_pin_enabled = !!enabled; }
+void sh7021_ocpm_intc_set_irq2_pin_enabled(int enabled) { irq2_pin_enabled = !!enabled; }
+void sh7021_ocpm_intc_set_dreq0_pin_enabled(int enabled) { dreq0_pin_enabled = !!enabled; }
+int sh7021_ocpm_intc_irq1_line_low(void) { return raster_line_low; }
 
 static uint16_t raw_pbdr(void) {
     uint8_t blob[64];
@@ -79,11 +84,11 @@ int main(void) {
        input; the latch remains independently writable. */
     sh7021_ocpm_pfc_write16(0x05ffffc8u, 0x0c02u);
     sh7021_ocpm_pfc_write16(0x05ffffc4u, 0x0400u);
-    sh7021_ocpm_pfc_write16(0x05ffffc0u, 0x0014u);
+    sh7021_ocpm_pfc_write16(0x05ffffc0u, 0x2014u);
     cart_present = 1;
-    expect16("PA8 cartridge detect", sh7021_ocpm_pfc_read16(0x05ffffc0u), 0x0114u);
+    expect16("PA8 cartridge detect", sh7021_ocpm_pfc_read16(0x05ffffc0u), 0x2114u);
     cart_present = 0;
-    expect16("PA8 no cartridge", sh7021_ocpm_pfc_read16(0x05ffffc0u), 0x0014u);
+    expect16("PA8 no cartridge", sh7021_ocpm_pfc_read16(0x05ffffc0u), 0x2014u);
 
     /* Keep the PA13/IRQ1 mux side effect covered too. */
     sh7021_ocpm_pfc_write16(0x05ffffc8u, 0x0400u);
@@ -92,6 +97,29 @@ int main(void) {
         return 1;
     }
 
+    /* Raster DMA and the external IRQs use alternate PA12..PA14 pin modes,
+       while PADR reads the physical PA13 pin when that pin is an input. */
+    sh7021_ocpm_pfc_write16(0x05ffffc8u, 0x1100u);
+    if (!irq0_pin_enabled || !irq2_pin_enabled || irq1_pin_enabled || dreq0_pin_enabled) {
+        fprintf(stderr, "PACR1 IRQ0/IRQ2 mux failed\n");
+        return 1;
+    }
+    sh7021_ocpm_pfc_write16(0x05ffffc8u, 0x0c00u);
+    if (irq1_pin_enabled || !dreq0_pin_enabled || irq0_pin_enabled || irq2_pin_enabled) {
+        fprintf(stderr, "PACR1 DREQ0 mux failed\n");
+        return 1;
+    }
+    sh7021_ocpm_pfc_write16(0x05ffffc4u, 0u);
+    raster_line_low = 0;
+    if (!(sh7021_ocpm_pfc_read16(0x05ffffc0u) & 0x2000u)) {
+        fprintf(stderr, "PA13 high physical input was not read\n");
+        return 1;
+    }
+    raster_line_low = 1;
+    if (sh7021_ocpm_pfc_read16(0x05ffffc0u) & 0x2000u) {
+        fprintf(stderr, "PA13 low physical input was not read\n");
+        return 1;
+    }
     puts("sh7021_pfc_test: OK");
     return 0;
 }

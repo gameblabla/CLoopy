@@ -1,5 +1,6 @@
 #include "core/sh7021/peripherals/sh7021_intc.h"
 #include "core/sh7021/sh7021_local.h"
+#include "core/sh7021/peripherals/sh7021_dmac.h"
 #include <assert.h>
 #include <string.h>
 #include <stdbool.h>
@@ -12,6 +13,9 @@ typedef struct INTCState {
     int irq_offs[IRQ_NumIrq];
     uint16_t icr;
     int irq1_pin_enabled;
+    int irq0_pin_enabled;
+    int irq2_pin_enabled;
+    int dreq0_pin_enabled;
     int irq1_line_asserted;
     int irq1_effective_asserted;
     int presented_irq;
@@ -186,6 +190,8 @@ void sh7021_ocpm_intc_deassert_irq(IRQ irq) {
 }
 
 void sh7021_ocpm_intc_pulse_irq(IRQ irq, int vector_offs) {
+    if ((irq == IRQ_IRQ0 && !state.irq0_pin_enabled) ||
+        (irq == IRQ_IRQ2 && !state.irq2_pin_enabled)) return;
     int id = (int)irq;
     int was_pending = source_pending(id);
     state.edge_pending[id] = true;
@@ -193,14 +199,25 @@ void sh7021_ocpm_intc_pulse_irq(IRQ irq, int vector_offs) {
     send_irq_signal(!was_pending, 0);
 }
 
+void sh7021_ocpm_intc_set_irq0_pin_enabled(int enabled) { state.irq0_pin_enabled = !!enabled; }
+void sh7021_ocpm_intc_set_irq2_pin_enabled(int enabled) { state.irq2_pin_enabled = !!enabled; }
+void sh7021_ocpm_intc_set_dreq0_pin_enabled(int enabled) {
+    state.dreq0_pin_enabled = !!enabled;
+    if (!enabled) sh7021_ocpm_dmac_dreq0(0, 0);
+}
+int sh7021_ocpm_intc_irq1_line_low(void) { return state.irq1_line_asserted; }
+
 void sh7021_ocpm_intc_set_irq1_pin_enabled(int enabled) {
     state.irq1_pin_enabled = enabled ? 1 : 0;
     update_irq1_effective(1);
 }
 
 void sh7021_ocpm_intc_set_irq1_line(int asserted_low) {
+    int old = state.irq1_line_asserted;
     state.irq1_line_asserted = asserted_low ? 1 : 0;
     update_irq1_effective(1);
+    if (state.dreq0_pin_enabled)
+        sh7021_ocpm_dmac_dreq0(state.irq1_line_asserted, !old && state.irq1_line_asserted);
 }
 
 void sh7021_ocpm_intc_acknowledge(void) {

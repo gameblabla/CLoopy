@@ -468,7 +468,9 @@ static void sh7021_run_one(uint16_t instr) {
         sh7021.load_delay_valid, sh7021.load_delay_reg, instr);
     sh7021.load_delay_valid = 0;
 
+    sh7021.in_execute = 1;
     sh7021_interpreter_run(instr);
+    sh7021.in_execute = 0;
 
     int loaded = sh7021_interlock_loaded_gpr(instr);
     if (loaded >= 0) {
@@ -495,17 +497,44 @@ void sh7021_run(void) {
     sh7021_idle_unsafe_read = 0;
 
     while (sh7021.cycles_left > 0) {
+        if (sh7021_ocpm_dmac_busy() && sh7021_ocpm_dmac_run(sh7021.sleep_mode == 1, &sh7021.cycles_left)) {
+            continue;
+        }
         if (sh7021_service_pending_irq()) {
             continue;
         }
+        /* SLEEP does not repeatedly fetch/execute its opcode.  The SH-1
+           holds the PC at SLEEP until an unmasked exception wakes it; only
+           peripheral events continue while the CPU is stopped.  If a request
+           is being synchronized, let its presentation delay elapse without
+           retiring spurious instructions. */
+        if (sh7021.sleep_mode == 1) {
+            int delay = (sh7021.pending_irq_vector >> 8) & 0xff;
+            if (delay && can_exec_irq(sh7021.pending_irq_prio)) {
+                int elapsed = delay < sh7021.cycles_left ? delay : sh7021.cycles_left;
+                sh7021.cycles_left -= elapsed;
+                sh7021_advance_irq_presentation(elapsed);
+            } else {
+                sh7021.cycles_left = 0;
+            }
+            continue;
+        }
         uint32_t fetch_pc = sh7021.pc;
+        /* Odd instruction addresses fetch the aligned halfword on the bus,
+           but raise vector 9 before that halfword can execute.  The return
+           address is the odd target, including following JMP/JSR slots. */
+        if (fetch_pc & 1u) {
+            sh7021_raise_exception_to(9, fetch_pc);
+            sh7021.cycles_left -= 5;
+            continue;
+        }
 
         /* Evaluated at an instruction boundary before any state for this
            iteration is touched, so bailing out here leaves the CPU parked
            cleanly at the loop head.  irq_delay must be clear: inside a
            deferral window an interrupt is owed but has not been taken, and
            consuming the slice would push it past the point it was due. */
-        if (idle_skip_enabled) {
+        if (idle_skip_enabled && !sh7021_ocpm_dmac_busy()) {
             uint32_t addr = fetch_pc;
             if (addr < idle_prev_addr && (idle_prev_addr - addr) <= IDLE_MAX_SPAN && !sh7021.in_delay_slot &&
                 !sh7021.irq_delay) {
@@ -580,11 +609,12 @@ void sh7021_run(void) {
         uint16_t instr = sh7021_bus_fetch16(fetch_pc);
         sh7021.current_opcode_pc = fetch_pc;
         sh7021.in_delay_slot = 0;
+        sh7021.data_address_error = 0;
         sh7021.pc = fetch_pc + 2;
         sh7021_run_one(instr);
         sh7021.cycles_left--;
 
-        if (sh7021.m_delay) {
+        if (sh7021.m_delay && !sh7021.data_address_error) {
             uint32_t target_pc = sh7021.m_delay;
             sh7021.m_delay = 0;
             uint32_t delay_pc = fetch_pc + 2;
@@ -608,12 +638,23 @@ void sh7021_run(void) {
             }
         }
 
+        if (sh7021.data_address_error) {
+            /* Data faults are taken after the bus transaction and instruction.
+               The processor stacks the faulting instruction +4, regardless
+               of the following normal PC. */
+            uint32_t fault_pc = sh7021.current_opcode_pc + 4u;
+            sh7021.data_address_error = 0;
+            sh7021_raise_exception_to(9, fault_pc);
+            sh7021.cycles_left -= 5;
+        }
+
         /* Charged after the delay slot, so a branch and its slot bill as one
            unit of control flow.  Splitting them would attribute the slot's cost
            to an address that is never independently reachable. */
         int retired_cycles = (int)(cycles_at_fetch - sh7021.cycles_left);
         loopy_debug_cpu_post(fetch_pc, retired_cycles);
         sh7021_advance_irq_presentation(retired_cycles);
+        if (sh7021_ocpm_dmac_busy()) sh7021_ocpm_dmac_cpu_accessed(1);
     }
 }
 
@@ -703,6 +744,13 @@ int sh7021_service_pending_irq(void) {
        (or the same still-asserted level source), so do not clear the CPU latch
        after this call. */
     sh7021_ocpm_intc_acknowledge();
+    /* RTE must resume at the SLEEP opcode, which then retires once and
+       advances to its following instruction.  Leaving sleep_mode=1 here
+       instead executes SLEEP forever after the first successful interrupt. */
+    if (sh7021.sleep_mode == 1) {
+        sh7021.sleep_mode = 2;
+        sh7021.cycles_left -= 2; /* measured sleep wake-up penalty */
+    }
     sh7021_raise_exception(vector);
     /* Once presented and accepted, only the controller/exception hand-off is
        charged here.  The request's synchronizer latency elapsed while normal
@@ -750,15 +798,19 @@ int sh7021_service_pending_irq(void) {
     return 1;
 }
 
-void sh7021_raise_exception(int vector_id) {
+void sh7021_raise_exception_to(int vector_id, uint32_t return_pc) {
     assert(vector_id < 0x100);
     sh7021.gpr[15] -= 4;
     sh7021_bus_write32(sh7021.gpr[15], sh7021.sr);
     sh7021.gpr[15] -= 4;
-    sh7021_bus_write32(sh7021.gpr[15], sh7021.pc);
+    sh7021_bus_write32(sh7021.gpr[15], return_pc);
     uint32_t vector_addr = sh7021.vbr + ((uint32_t)vector_id * 4u);
     uint32_t new_pc = sh7021_bus_read32(vector_addr);
     sh7021_set_pc(new_pc);
+}
+
+void sh7021_raise_exception(int vector_id) {
+    sh7021_raise_exception_to(vector_id, sh7021.pc);
 }
 
 void sh7021_raise_slot_illegal(void) {

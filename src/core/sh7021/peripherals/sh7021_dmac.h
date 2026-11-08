@@ -27,6 +27,12 @@ void sh7021_ocpm_dmac_initialize(void);
 void sh7021_ocpm_dmac_send_dreq(DREQ dreq);
 void sh7021_ocpm_dmac_clear_dreq(DREQ dreq);
 void sh7021_ocpm_dmac_pulse_dreq(DREQ dreq);
+/* VDP PA13: active-low raster signal and falling-edge DREQ0 strobe. */
+void sh7021_ocpm_dmac_dreq0(int low, int fell);
+int sh7021_ocpm_dmac_busy(void);
+int sh7021_ocpm_dmac_run(int cpu_idle, const int32_t *cycles_left);
+void sh7021_ocpm_dmac_cpu_accessed(int transfers);
+void sh7021_ocpm_dmac_note_cpu_transfer(int bytes);
 uint8_t sh7021_ocpm_dmac_read8(uint32_t addr);
 uint16_t sh7021_ocpm_dmac_read16(uint32_t addr);
 uint32_t sh7021_ocpm_dmac_read32(uint32_t addr);
@@ -35,6 +41,8 @@ void sh7021_ocpm_dmac_write16(uint32_t addr, uint16_t value);
 void sh7021_ocpm_dmac_write32(uint32_t addr, uint32_t value);
 
 uint32_t sh7021_ocpm_dmac_state_blob_size(void);
+/* Size of the DMAC chunk in v1-v4 savestates (before asynchronous DMA). */
+uint32_t sh7021_ocpm_dmac_legacy_state_blob_size(void);
 void sh7021_ocpm_dmac_get_state_blob(void *dst, uint32_t size);
 void sh7021_ocpm_dmac_set_state_blob(const void *src, uint32_t size);
 

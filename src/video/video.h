@@ -93,6 +93,7 @@ void video_dump_for_serial();
 int video_debug_peek(uint32_t addr, int bytes, uint32_t *out_value);
 
 uint32_t video_state_blob_size(void);
+int video_state_compatible_legacy_size(uint32_t size);
 void video_get_state_blob(void *dst, uint32_t size);
 void video_set_state_blob(const void *src, uint32_t size);
 void video_set_bmp_dump_enabled(bool enabled);

@@ -20,6 +20,9 @@ typedef struct SH7021Timer {
     TimerCtrl ctrl;
     int intr_enable;
     int intr_flag;
+    /* The SH7021 requires a TSR read before a flag can be cleared. */
+    int intr_flag_read;
+    uint8_t ctrl_raw, io_ctrl, intr_enable_raw;
     uint32_t counter;
     uint32_t counter_when_started;
     uint32_t gen_reg[2];
@@ -30,8 +33,26 @@ typedef struct TimerState {
     int timer_enable;
     int sync_ctrl;
     int mode;
+    uint8_t fc_ctrl, write_latch;
     SH7021Timer timers[TIMER_COUNT];
 } TimerState;
+
+/* Version-2 state chunks predate timer register readback. Their layout is
+   different, so restoring by memcpy would scramble counters and event handles. */
+typedef struct LegacySH7021Timer {
+    TimingEventHandle ev;
+    IRQ irq;
+    int enabled, id;
+    TimerCtrl ctrl;
+    int intr_enable, intr_flag;
+    uint32_t counter, counter_when_started, gen_reg[2];
+    int64_t time_when_started;
+} LegacySH7021Timer;
+
+typedef struct LegacyTimerState {
+    int timer_enable, sync_ctrl, mode;
+    LegacySH7021Timer timers[TIMER_COUNT];
+} LegacyTimerState;
 
 typedef struct TimerDev { SH7021Timer *timer; int reg; } TimerDev;
 static TimerState state;
@@ -40,22 +61,38 @@ static void timer_update_counter(SH7021Timer *timer) {
     if (!timing_event_handle_is_valid(timer->ev)) return;
     int clock = timer->ctrl.clock & 0x3;
     int64_t time_elapsed = timing_get_timestamp(TIMING_CPU_TIMER) - timer->time_when_started;
+    if (time_elapsed < 0) time_elapsed = 0;
     timer->counter = timer->counter_when_started + (uint32_t)(time_elapsed >> clock);
     timer->counter &= 0xFFFFu;
 }
 
-static void timer_start(SH7021Timer *timer);
+/* TSR is readable one CPU cycle after a compare match, even when the
+   scheduler has not yet dispatched the event.  This follows the measured
+   SH7021 ITU behavior rather than making flag reads depend on the timeslice. */
+static void timer_flags_due(SH7021Timer *timer) {
+    if (!timing_event_handle_is_valid(timer->ev)) return;
+    int64_t now = timing_get_timestamp(TIMING_CPU_TIMER);
+    const uint32_t target[3] = {timer->gen_reg[0], timer->gen_reg[1], 0x10000u};
+    for (int i = 0; i < 3; ++i) {
+        if (timer->counter_when_started >= target[i]) continue;
+        int64_t due = timer->time_when_started +
+                      ((int64_t)(target[i] - timer->counter_when_started) << (timer->ctrl.clock & 3));
+        if (now >= due + 1) timer->intr_flag |= 1 << i;
+    }
+}
 
-static void timer_set_enable(SH7021Timer *timer, bool new_enable) {
+static void timer_start(SH7021Timer *timer, int delay);
+
+static void timer_set_enable(SH7021Timer *timer, bool new_enable, int delay) {
     timer->enabled = new_enable;
     if (!timing_event_handle_is_valid(timer->ev) && timer->enabled) {
-        timer_start(timer);
+        timer_start(timer, delay);
     } else if (timing_event_handle_is_valid(timer->ev) && !timer->enabled) {
         timing_cancel_event(&timer->ev);
     }
 }
 
-static void timer_start(SH7021Timer *timer) {
+static void timer_start(SH7021Timer *timer, int delay) {
     int clock = timer->ctrl.clock & 0x3;
     if (timer->ctrl.clear_mode == 3) timer->ctrl.clear_mode = 0;
     const uint32_t OVERFLOW_TARGET = 0x10000u;
@@ -65,9 +102,9 @@ static void timer_start(SH7021Timer *timer) {
     }
     uint32_t cycles = (nearest_target - timer->counter) << clock;
     if (cycles == 0) cycles = 1;
-    TimingUnitCycle sched_cycles = timing_convert_cpu(cycles);
+    TimingUnitCycle sched_cycles = timing_convert_cpu((int64_t)cycles + delay);
     timer->ev = timing_add_event(ev_func, sched_cycles, (uint64_t)(uint32_t)timer->id, TIMING_CPU_TIMER);
-    timer->time_when_started = timing_get_timestamp(TIMING_CPU_TIMER);
+    timer->time_when_started = timing_get_timestamp(TIMING_CPU_TIMER) + delay;
     timer->counter_when_started = timer->counter;
 }
 
@@ -82,8 +119,8 @@ static void update_timer_irq(SH7021Timer *timer) {
 
 static void update_timer_target(SH7021Timer *timer) {
     if (timer->enabled) {
-        timer_set_enable(timer, false);
-        timer_set_enable(timer, true);
+        timer_set_enable(timer, false, 0);
+        timer_set_enable(timer, true, 0);
     }
 }
 
@@ -138,7 +175,7 @@ static void intr_event(uint64_t param, int cycles_late) {
     else timer->counter = (nearest_target + late_ticks) & 0xFFFFu;
 
     update_timer_irq(timer);
-    timer_start(timer);
+    timer_start(timer, 0);
 }
 
 static TimerDev get_dev_from_addr(uint32_t addr) {
@@ -173,10 +210,14 @@ uint8_t sh7021_ocpm_timer_read8(uint32_t addr) {
     if (timer) {
         timer_update_counter(timer);
         switch (reg) {
-        case 0x00: return (uint8_t)(timer->ctrl.clock | (timer->ctrl.edge_mode << 3) | (timer->ctrl.clear_mode << 5));
-        case 0x01: return 0;
-        case 0x02: return (uint8_t)timer->intr_enable;
-        case 0x03: return (uint8_t)(timer->intr_flag | 0x78);
+        case 0x00: return timer->ctrl_raw;
+        case 0x01: return (uint8_t)(timer->io_ctrl | 0x08u);
+        case 0x02: return (uint8_t)(timer->intr_enable_raw | 0x78u);
+        case 0x03: {
+            timer_flags_due(timer);
+            timer->intr_flag_read |= timer->intr_flag;
+            return (uint8_t)(timer->intr_flag | 0x78u);
+        }
         case 0x04: return (uint8_t)(timer->counter >> 8);
         case 0x05: return (uint8_t)timer->counter;
         case 0x06: return (uint8_t)(timer->gen_reg[0] >> 8);
@@ -190,24 +231,32 @@ uint8_t sh7021_ocpm_timer_read8(uint32_t addr) {
     case 0x00: return (uint8_t)(state.timer_enable | 0x60);
     case 0x01: return (uint8_t)(state.sync_ctrl | 0x60);
     case 0x02: return (uint8_t)state.mode;
+    case 0x03: return (uint8_t)(state.fc_ctrl | 0x40u);
     case 0x31: return 0;
     default: return 0;
     }
 }
 
 uint16_t sh7021_ocpm_timer_read16(uint32_t addr) {
-    uint16_t hi = sh7021_ocpm_timer_read8(addr & ~1u);
-    uint16_t lo = sh7021_ocpm_timer_read8((addr & ~1u) + 1u);
-    return (uint16_t)((hi << 8) | lo);
+    TimerDev dev = get_dev_from_addr(addr);
+    if (dev.timer) {
+        SH7021Timer *t = dev.timer;
+        if (dev.reg == 0x04) { timer_update_counter(t); return (uint16_t)t->counter; }
+        if (dev.reg == 0x06) return (uint16_t)t->gen_reg[0];
+        if (dev.reg == 0x08) return (uint16_t)t->gen_reg[1];
+    }
+    return (uint16_t)((sh7021_ocpm_timer_read8(addr & ~1u) << 8) | state.write_latch);
 }
 
 void sh7021_ocpm_timer_write8(uint32_t addr, uint8_t value) {
+    state.write_latch = value;
     TimerDev dev = get_dev_from_addr(addr);
     SH7021Timer *timer = dev.timer;
     int reg = dev.reg;
     if (timer) {
         switch (reg) {
         case 0x00:
+            timer->ctrl_raw = value;
             LOOPY_DEBUG_PRINTF("[Timer] write timer%d ctrl: %02X\n", timer->id, value);
             timer_update_counter(timer);
             timer->ctrl.clock = value & 0x7;
@@ -216,16 +265,20 @@ void sh7021_ocpm_timer_write8(uint32_t addr, uint8_t value) {
             update_timer_target(timer);
             break;
         case 0x01:
+            timer->io_ctrl = value & 0xF7u;
             LOOPY_DEBUG_PRINTF("[Timer] write timer%d io ctrl: %02X\n", timer->id, value);
             break;
         case 0x02:
             LOOPY_DEBUG_PRINTF("[Timer] write timer%d intr enable: %02X\n", timer->id, value);
-            timer->intr_enable = value;
+            timer->intr_enable_raw = value & 0x87u;
+            timer->intr_enable = value & 0x07u;
             update_timer_irq(timer);
             break;
         case 0x03:
             LOOPY_DEBUG_PRINTF("[Timer] write timer%d intr flag: %02X\n", timer->id, value);
-            timer->intr_flag &= value;
+            int cleared = timer->intr_flag_read & ~value;
+            timer->intr_flag &= ~cleared;
+            timer->intr_flag_read &= ~cleared;
             update_timer_irq(timer);
             break;
         case 0x04:
@@ -268,7 +321,7 @@ void sh7021_ocpm_timer_write8(uint32_t addr, uint8_t value) {
     case 0x00:
         LOOPY_DEBUG_PRINTF("[Timer] write master enable: %02X\n", value);
         state.timer_enable = value & 0x1F;
-        for (int i = 0; i < TIMER_COUNT; i++) timer_set_enable(&state.timers[i], ((value >> i) & 0x1) != 0);
+        for (int i = 0; i < TIMER_COUNT; i++) timer_set_enable(&state.timers[i], ((value >> i) & 0x1) != 0, 2);
         break;
     case 0x01:
         LOOPY_DEBUG_PRINTF("[Timer] write sync ctrl: %02X\n", value);
@@ -278,6 +331,9 @@ void sh7021_ocpm_timer_write8(uint32_t addr, uint8_t value) {
         LOOPY_DEBUG_PRINTF("[Timer] write mode: %02X\n", value);
         state.mode = value & 0x7F;
         break;
+    case 0x03:
+        state.fc_ctrl = value & 0xBFu;
+        break;
     default:
         LOOPY_DEBUG_PRINTF("[Timer] ignored write master reg%02X: %02X\n", reg, value);
         break;
@@ -285,10 +341,49 @@ void sh7021_ocpm_timer_write8(uint32_t addr, uint8_t value) {
 }
 
 void sh7021_ocpm_timer_write16(uint32_t addr, uint16_t value) {
+    TimerDev dev = get_dev_from_addr(addr);
+    if (dev.timer && (dev.reg == 0x04 || dev.reg == 0x06 || dev.reg == 0x08)) {
+        timer_update_counter(dev.timer);
+        if (dev.reg == 0x04) dev.timer->counter = value;
+        else dev.timer->gen_reg[(dev.reg - 0x06) / 2] = value;
+        update_timer_target(dev.timer);
+        return;
+    }
     sh7021_ocpm_timer_write8(addr & ~1u, (uint8_t)(value >> 8));
     sh7021_ocpm_timer_write8((addr & ~1u) + 1u, (uint8_t)value);
 }
 
 uint32_t sh7021_ocpm_timer_state_blob_size(void) { return (uint32_t)sizeof(state); }
 void sh7021_ocpm_timer_get_state_blob(void *dst, uint32_t size) { if (dst && size == sizeof(state)) memcpy(dst, &state, sizeof(state)); }
-void sh7021_ocpm_timer_set_state_blob(const void *src, uint32_t size) { if (src && size == sizeof(state)) memcpy(&state, src, sizeof(state)); }
+void sh7021_ocpm_timer_set_state_blob(const void *src, uint32_t size) {
+    if (!src) return;
+    if (size == sizeof(state)) {
+        memcpy(&state, src, sizeof(state));
+        return;
+    }
+    if (size != sizeof(LegacyTimerState)) return;
+    LegacyTimerState old;
+    memcpy(&old, src, sizeof(old));
+    memset(&state, 0, sizeof(state));
+    state.timer_enable = old.timer_enable;
+    state.sync_ctrl = old.sync_ctrl;
+    state.mode = old.mode;
+    for (int i = 0; i < TIMER_COUNT; ++i) {
+        const LegacySH7021Timer *a = &old.timers[i];
+        SH7021Timer *b = &state.timers[i];
+        b->ev = a->ev;
+        b->irq = a->irq;
+        b->enabled = a->enabled;
+        b->id = a->id;
+        b->ctrl = a->ctrl;
+        b->intr_enable = a->intr_enable;
+        b->intr_flag = a->intr_flag;
+        b->ctrl_raw = (uint8_t)(a->ctrl.clock | (a->ctrl.edge_mode << 3) |
+                                (a->ctrl.clear_mode << 5));
+        b->intr_enable_raw = (uint8_t)a->intr_enable;
+        b->counter = a->counter;
+        b->counter_when_started = a->counter_when_started;
+        memcpy(b->gen_reg, a->gen_reg, sizeof(b->gen_reg));
+        b->time_when_started = a->time_when_started;
+    }
+}

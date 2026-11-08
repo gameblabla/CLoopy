@@ -1419,6 +1419,10 @@ static void STCMVBR(uint32_t n)
 /*  STS     MACH,Rn */
 static void STSMACH(uint32_t n)
 {
+	uint16_t prev = 0;
+	if (sh7021.current_opcode_pc >= 2 &&
+	    peek_opcode(sh7021.current_opcode_pc - 2u, &prev) && (prev & 0xF00Fu) == 0x400Fu)
+		sh7021.cycles_left--;
 	sh7021.gpr[n] = sh7021_mach_sh1_read();
 	sh7021_block_irq_next();
 }
@@ -1429,7 +1433,8 @@ static void STSMACL(uint32_t n)
 	/* Reading MACL immediately after MULS/MULU waits for completion. */
 	uint16_t prev = 0;
 	if (sh7021.current_opcode_pc >= 2 &&
-	    peek_opcode(sh7021.current_opcode_pc - 2u, &prev) && opcode_is_muls_or_mulu(prev))
+	    peek_opcode(sh7021.current_opcode_pc - 2u, &prev) &&
+	    (opcode_is_muls_or_mulu(prev) || (prev & 0xF00Fu) == 0x400Fu))
 		sh7021.cycles_left--;
 	sh7021.gpr[n] = sh7021.macl;
 	sh7021_block_irq_next();
@@ -1939,13 +1944,10 @@ static void RTE(void) {
     sh7021.sr = sh7021_bus_read32(sh7021.ea) & SH_FLAGS;
     sh7021.gpr[15] += 4;
     sh7021.cycles_left -= 1;
-    /* SH-1 documents an interrupt-inhibit interval around RTE in addition to
-       the delayed branch itself.  Model that at the first instruction boundary
-       after the return has landed.  This is also essential for a level-sensed
-       external IRQ: while the pin remains active, hardware executes one
-       instruction at the restored PC before the request can be accepted again,
-       rather than re-entering the handler forever at the return boundary. */
-    sh7021_block_irq_next();
+    /* The RTE delay slot completes before interrupt arbitration resumes.
+       On SH7021 there is no additional post-RTE inhibition: a level-sensed
+       IRQ that remains asserted may immediately re-enter the handler and
+       starve the interrupted program (timing-lab R1-R9). */
 }
 
 static void TRAPA(uint32_t i) {

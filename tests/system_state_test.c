@@ -3,7 +3,9 @@
 #include "core/sh7021/sh7021_local.h"
 #include "core/sh7021/sh7021_bus.h"
 #include "core/sh7021/peripherals/sh7021_bsc.h"
+#include "core/sh7021/peripherals/sh7021_dmac.h"
 #include "core/sh7021/peripherals/sh7021_pfc.h"
+#include "video/vdp_local.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -103,6 +105,27 @@ int main(void) {
     if (sh7021_bus_read16(0x0ffffffeu) != 0xa55au)
         fail("area-7 on-chip RAM intermediate shadow does not alias");
 
+    /* Area 1 is an 8-bit view of the same DRAM as area 9.  The high
+       byte is not wired, even for word reads, and writes reach D0..D7. */
+    sh7021_bus_write16(0x09000080u, 0x1357u);
+    if (sh7021_bus_read16(0x01000080u) != 0x5757u ||
+        sh7021_bus_read8(0x01000080u) != 0x57u ||
+        sh7021_bus_read8(0x01000081u) != 0x57u)
+        fail("area-1 work RAM low-byte lanes are incorrect");
+    sh7021_bus_write16(0x01000080u, 0xA5EEu);
+    if (sh7021_bus_read16(0x09000080u) != 0x13EEu)
+        fail("area-1 word write incorrectly drives high DRAM byte");
+
+    /* VDP open-bus reads return the last READ word, not the most recent
+       write. Unmapped offsets and write-only registers share this latch. */
+    sh7021_bus_write16(0x0C051000u, 0x5A3Cu);
+    if (sh7021_bus_read16(0x0C051000u) != 0x5A3Cu)
+        fail("palette read did not load VDP read-data latch");
+    sh7021_bus_write16(0x0C051000u, 0x25C3u);
+    if (sh7021_bus_read16(0x0C180000u) != 0x5A3Cu ||
+        sh7021_bus_read16(0x0C058006u) != 0x5A3Cu)
+        fail("VDP open bus or write-only read modified data latch");
+
     uint32_t size = system_state_blob_size();
     if (!size) fail("zero state size");
     uint8_t *state = (uint8_t *)malloc(size);
@@ -115,6 +138,20 @@ int main(void) {
     sh7021.load_delay_valid = 1;
     sh7021_ocpm_pfc_write16(0x05ffffc2u, 0x55aau);
     sh7021_ocpm_pfc_write16(0x05ffffc8u, 0x0400u);
+    /* The new line-latched raster fields must survive savestates, including
+       a pending colour split when the CPU is paused mid-picture. */
+    vdp.bitmap_line_scrollx[1] = 0x12Au;
+    vdp.bitmap_frame_scrolly[2] = 0x15Bu;
+    vdp.bitmap_frame_screenx[3] = 0x17Cu;
+    vdp.layer_ctrl.bitmap_enable[1] = 1;
+    vdp.bitmap_enable_frame[1] = 1;
+    vdp.color_split_count = 1;
+    vdp.color_splits[0].x_end = 113;
+    vdp.color_splits[0].backdrops[0] = 0x2233u;
+    vdp.color_splits[0].palette[30] = 0x4Eu;
+    vdp.snow_tile_blank[42] = 1;
+    vdp.snow_palette_valid[43] = 1;
+    vdp.snow_palette_rgb[43] = 0x2345u;
 
     uint8_t bus_before[48];
     memset(bus_before, 0, sizeof(bus_before));
@@ -139,15 +176,188 @@ int main(void) {
     sh7021.load_delay_valid = 0;
     sh7021_ocpm_pfc_write16(0x05ffffc2u, 0u);
     sh7021_ocpm_pfc_write16(0x05ffffc8u, 0u);
+    vdp.bitmap_line_scrollx[1] = 0;
+    vdp.bitmap_frame_scrolly[2] = 0;
+    vdp.bitmap_frame_screenx[3] = 0;
+    vdp.bitmap_enable_frame[1] = 0;
+    vdp.layer_ctrl.bitmap_enable[1] = 0;
+    vdp.color_split_count = 0;
+    vdp.color_splits[0].x_end = 0;
+    vdp.color_splits[0].palette[30] = 0;
+    vdp.snow_tile_blank[42] = 0;
+    vdp.snow_palette_valid[43] = 0;
+    vdp.snow_palette_rgb[43] = 0;
     sh7021_bus_timing_reset();
     if (system_load_state_from_buffer(state, size) != 0) fail("round-trip load failed");
     if (sh7021.gpr[3] != 0x12345678u || !sh7021.load_delay_valid || sh7021.load_delay_reg != 7u)
         fail("CPU state did not round-trip");
     if (pfc_raw_pbdr() != 0x55aau || sh7021_ocpm_pfc_read16(0x05ffffc8u) != 0x0400u)
         fail("PFC state did not round-trip");
+    if (vdp.bitmap_line_scrollx[1] != 0x12Au ||
+        vdp.bitmap_frame_scrolly[2] != 0x15Bu ||
+        vdp.bitmap_frame_screenx[3] != 0x17Cu ||
+        vdp.bitmap_enable_frame[1] != 1 ||
+        vdp.color_split_count != 1 || vdp.color_splits[0].x_end != 113 ||
+        vdp.color_splits[0].backdrops[0] != 0x2233u ||
+        vdp.color_splits[0].palette[30] != 0x4Eu ||
+        vdp.snow_tile_blank[42] != 1 ||
+        vdp.snow_palette_valid[43] != 1 ||
+        vdp.snow_palette_rgb[43] != 0x2345u)
+        fail("VDP pending line-state fields did not round-trip");
     uint8_t bus_after[48];
     sh7021_bus_timing_get_state_blob(bus_after, sizeof(bus_after));
     if (memcmp(bus_before, bus_after, sizeof(bus_before)) != 0) fail("bus timing state did not round-trip");
+
+    /* A complete v2 savestate has a 336-byte timer chunk and a 204200-byte
+       video chunk (including the old VDP struct's tail padding). It must
+       survive the v3 layout additions without disturbing unrelated chunks. */
+    {
+        const uint32_t old_timer_size = 336u, old_video_size = 204200u;
+        const uint32_t old_dma_size = sh7021_ocpm_dmac_legacy_state_blob_size();
+        const uint32_t new_dma_size = sh7021_ocpm_dmac_state_blob_size();
+        const uint32_t new_timer_size = 376u, new_video_size = video_state_blob_size();
+        uint32_t legacy_size = size - (new_timer_size - old_timer_size) -
+                                      (new_video_size - old_video_size) -
+                                      (new_dma_size - old_dma_size);
+        uint8_t *legacy = (uint8_t *)malloc(legacy_size);
+        if (!legacy) fail("legacy-state allocation failed");
+        const uint8_t *from = state + 16;
+        uint8_t *to = legacy + 16;
+        memcpy(legacy, state, 16);
+        uint32_t n_chunks = get_u32(state + 12);
+        for (uint32_t i = 0; i < n_chunks; i++) {
+            const uint8_t *data = from + 8;
+            uint32_t n = get_u32(from + 4);
+            if (memcmp(from, "TMRS", 4) == 0) {
+                if (n != new_timer_size) fail("unexpected v3 timer size");
+                memcpy(to, "TMRS", 4);
+                put_u32(to + 4, old_timer_size);
+                memcpy(to + 8, data, 16);
+                for (int j = 0; j < 5; ++j) {
+                    const uint8_t *modern = data + 16 + j * 72;
+                    uint8_t *old = to + 8 + 16 + j * 64;
+                    memcpy(old, modern, 40);
+                    memcpy(old + 40, modern + 48, 24);
+                }
+                to += 8 + old_timer_size;
+            } else if (memcmp(from, "VDP ", 4) == 0) {
+                if (n != new_video_size) fail("unexpected v3 VDP size");
+                memcpy(to, "VDP ", 4);
+                put_u32(to + 4, old_video_size);
+                memcpy(to + 8, data, old_video_size);
+                to += 8 + old_video_size;
+            } else if (memcmp(from, "DMAC", 4) == 0) {
+                if (n != new_dma_size) fail("unexpected v5 DMAC size in v2 fixture");
+                memcpy(to, "DMAC", 4);
+                put_u32(to + 4, old_dma_size);
+                memcpy(to + 8, data, old_dma_size);
+                to += 8 + old_dma_size;
+            } else {
+                memcpy(to, from, n + 8);
+                to += n + 8;
+            }
+            from += n + 8;
+        }
+        size_t trailing = (size_t)(state + size - from);
+        memcpy(to, from, trailing);
+        to += trailing;
+        if ((size_t)(to - legacy) != legacy_size) fail("legacy-state size wrong");
+        vdp.layer_ctrl.bitmap_enable[1] = 0;
+        vdp.bitmap_enable_frame[1] = 0;
+        sh7021.gpr[3] = 0;
+        if (system_load_state_from_buffer(legacy, legacy_size) != 0)
+            fail("valid v2 state failed to load");
+        if (sh7021.gpr[3] != 0x12345678u ||
+            vdp.layer_ctrl.bitmap_enable[1] != 1 ||
+            vdp.bitmap_enable_frame[1] != 1)
+            fail("v2 state fields did not migrate correctly");
+        free(legacy);
+    }
+
+    /* A v3 state still contains the bitmap-enable latches but lacks the
+       v4 scanline bus-interference arrays. Its latches must be restored
+       without treating it as v2 and its new arrays must start empty. */
+    {
+        const uint32_t v3_video_size = 204216u;
+        const uint32_t v4_video_size = video_state_blob_size();
+        if (v4_video_size <= v3_video_size) fail("new VDP state fields missing");
+        const uint32_t old_dma_size = sh7021_ocpm_dmac_legacy_state_blob_size();
+        const uint32_t new_dma_size = sh7021_ocpm_dmac_state_blob_size();
+        uint32_t v3_size = size - (v4_video_size - v3_video_size) -
+                                  (new_dma_size - old_dma_size);
+        uint8_t *legacy = (uint8_t *)malloc(v3_size);
+        if (!legacy) fail("v3-state allocation failed");
+        memcpy(legacy, state, 16);
+        uint32_t nchunks = get_u32(state + 12);
+        const uint8_t *from = state + 16;
+        uint8_t *to = legacy + 16;
+        for (uint32_t i = 0; i < nchunks; i++) {
+            uint32_t n = get_u32(from + 4);
+            uint32_t keep = n;
+            if (memcmp(from, "VDP ", 4) == 0) {
+                if (n != v4_video_size) fail("new VDP chunk size unexpected");
+                keep = v3_video_size;
+            } else if (memcmp(from, "DMAC", 4) == 0) {
+                if (n != new_dma_size) fail("new DMAC chunk size unexpected");
+                keep = old_dma_size;
+            }
+            memcpy(to, from, 4);
+            put_u32(to + 4, keep);
+            memcpy(to + 8, from + 8, keep);
+            to += 8 + keep;
+            from += 8 + n;
+        }
+        size_t trailing = (size_t)(state + size - from);
+        memcpy(to, from, trailing);
+        to += trailing;
+        if ((size_t)(to - legacy) != v3_size) fail("v3-state size wrong");
+        vdp.bitmap_enable_frame[1] = 0;
+        vdp.snow_tile_blank[42] = 1;
+        vdp.snow_palette_valid[43] = 1;
+        vdp.snow_palette_rgb[43] = 1;
+        if (system_load_state_from_buffer(legacy, v3_size) != 0) fail("v3 state failed to load");
+        if (vdp.bitmap_enable_frame[1] != 1 || vdp.snow_tile_blank[42] != 0 ||
+            vdp.snow_palette_valid[43] != 0 || vdp.snow_palette_rgb[43] != 0)
+            fail("v3 migration corrupted bitmap latches or snow arrays");
+        free(legacy);
+    }
+
+    /* v4 states contain only the DMAC registers, with no autonomous-DMA
+       runtime.  Strip the newly appended runtime from an otherwise complete
+       v5 state, and verify the legacy layout is migrated deterministically. */
+    {
+        const uint32_t old_dma_size = sh7021_ocpm_dmac_legacy_state_blob_size();
+        const uint32_t new_dma_size = sh7021_ocpm_dmac_state_blob_size();
+        if (new_dma_size <= old_dma_size) fail("new DMA runtime state missing");
+        uint32_t legacy_size = size - (new_dma_size - old_dma_size);
+        uint8_t *legacy = (uint8_t *)malloc(legacy_size);
+        if (!legacy) fail("v4 DMA-state allocation failed");
+        memcpy(legacy, state, 16);
+        const uint8_t *from = state + 16;
+        uint8_t *to = legacy + 16;
+        uint32_t nchunks = get_u32(state + 12);
+        for (uint32_t i = 0; i < nchunks; i++) {
+            uint32_t n = get_u32(from + 4);
+            uint32_t keep = n;
+            if (memcmp(from, "DMAC", 4) == 0) {
+                if (n != new_dma_size) fail("unexpected v5 DMAC chunk size");
+                keep = old_dma_size;
+            }
+            memcpy(to, from, 4);
+            put_u32(to + 4, keep);
+            memcpy(to + 8, from + 8, keep);
+            to += keep + 8;
+            from += n + 8;
+        }
+        size_t trailing = (size_t)(state + size - from);
+        memcpy(to, from, trailing);
+        to += trailing;
+        if ((size_t)(to - legacy) != legacy_size) fail("v4 DMA-state size wrong");
+        if (system_load_state_from_buffer(legacy, legacy_size) != 0)
+            fail("valid v4 DMA state failed to load");
+        if (sh7021_ocpm_dmac_busy()) fail("v4 DMA migration retained runtime activity");
+        free(legacy);
+    }
 
     /* Restoring the same state must reproduce the same post-load bus/cycle
        trace, rather than inheriting row/refresh/fetch phase from the timeline

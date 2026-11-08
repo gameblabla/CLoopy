@@ -43,9 +43,14 @@ int main(void) {
      * the output lines.  This is direct-control behavior, not the automatic
      * matrix scan used by normal games. */
     loopy_io_reg_write16(0x054, 0x0001);
-    expect_u16("direct-output-row0", loopy_io_reg_read16(0x010), 0x0303);
+    expect_u16("direct-output-0-pad-present", loopy_io_reg_read16(0x010), 0x0001);
     loopy_io_reg_write16(0x054, 0x0002);
-    expect_u16("direct-output-row1", loopy_io_reg_read16(0x010), 0x0101);
+    expect_u16("direct-output-1-pad-present", loopy_io_reg_read16(0x010), 0x0001);
+
+    /* The direct port has no delayed high-byte detect signal when every
+       strobe is on. This matches PA in the physical timing-lab measurements. */
+    loopy_io_reg_write16(0x054, 0x003F);
+    expect_u16("direct-all-high-no-phantom-bit", loopy_io_reg_read16(0x010), 0x0001);
 
     loopy_io_shutdown();
     puts("io_controller_mode_test: OK");
